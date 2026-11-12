@@ -42,6 +42,7 @@ final class DesktopIcons {
   /// the scene after pausing, stopping, or resuming with a different desktop arrangement.
   private var generation = 0
   private var reading = false
+  private var refreshPending = false
   private var lastChange = -Double.infinity
   /// Last visibility state successfully applied. While paused, an unchanged visible desktop
   /// needs no AX reads; a reveal (or a pending refresh after an AX failure) needs one.
@@ -54,6 +55,7 @@ final class DesktopIcons {
     guard next != mode else { return }
     mode = next
     generation += 1
+    refreshPending = false
     timer?.invalidate()
     timer = nil
     lastChange = -Double.infinity
@@ -69,6 +71,15 @@ final class DesktopIcons {
     last = nil
     lastRefreshedVisibility = nil
     generation += 1
+    tick()
+  }
+
+  /// A release can finish a drop or change desktop visibility before the next idle poll.
+  /// Keep `last`: an unchanged layout must not restart the renderer's animation. If Finder is
+  /// already answering, coalesce requests into one fresh read immediately after it finishes.
+  func refreshAfterInteraction() {
+    guard mode != .stopped, checkTrust() else { return }
+    if reading { refreshPending = true; return }
     tick()
   }
 
@@ -114,6 +125,7 @@ final class DesktopIcons {
     let requestGeneration = generation
     let paused = mode == .permissionOnly
     let previousVisibility = lastRefreshedVisibility
+    refreshPending = false
     reading = true
     queue.async { [weak self] in
       let visible = Self.desktopVisible(finder: pid, windowManager: windowManagerPID, screen: screenArea)
@@ -138,7 +150,8 @@ final class DesktopIcons {
           self.report(Self.physical(rects))
           if let visible { self.lastRefreshedVisibility = visible }
         }
-        self.schedule()
+        if self.refreshPending { self.tick() }
+        else { self.schedule() }
       }
     }
   }

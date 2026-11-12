@@ -302,41 +302,22 @@ const previewScenarios = {
   },
 };
 
-const meadowResponseScenarios = {
-  'interactive cloud reveal becomes visible within 400ms and settles within 500ms'(h) {
+const meadowTimingScenarios = {
+  'interactive transitions retain their original 1800ms quadratic timing'(h) {
     h.startHosted(); h.hostIcons([]); h.advance(2600); h.hostIcons(A);
-    let visibleAt = null, settledAt = null;
-    for (let elapsed = 33; elapsed <= 660; elapsed += 33) {
-      h.advance(33);
-      const circles = h.cloudCircles();
-      for (let i = 2; i < circles.length; i += 4) {
-        if (circles[i] >= 2 && visibleAt === null) visibleAt = elapsed;
-      }
-      if (h.snapshot().mix === 1 && settledAt === null) settledAt = elapsed;
-    }
-    assert.ok(visibleAt !== null && visibleAt <= 400, `First cloud radius ≥2px appeared at ${visibleAt}ms`);
-    assert.ok(settledAt !== null && settledAt <= 500, `Cloud transition settled at ${settledAt}ms`);
-    console.log(`  Meadow reveal fixture (seed 1337, warp 0): visible ${visibleAt}ms; settled ${settledAt}ms`);
+    h.advance(450);
+    assert.ok(Math.abs(h.snapshot().mix - 0.125) < 1e-9, 'Interactive quarter-time should retain quadratic easing');
+    h.advance(450);
+    assert.ok(Math.abs(h.snapshot().mix - 0.5) < 1e-9, 'Interactive midpoint should stay at half mix');
+    h.advance(899); assert.ok(h.snapshot().mix < 1, 'Interactive animation must retain its full duration');
+    h.advance(1); assert.equal(h.snapshot().mix, 1, 'Interactive animation should complete at 1800ms');
   },
-  'moving an existing cloud changes its geometry on the first 33ms frame'(h) {
-    h.startHosted(); h.hostIcons(A); h.advance(2600);
-    const before = h.cloudCircles(); assert.ok(before.length > 0, 'Fixture needs visible icon clouds');
-    h.hostIcons(B); h.advance(33);
-    const after = h.cloudCircles(), radii = new Map();
-    for (let i = 0; i < after.length; i += 4) radii.set(`${after[i]},${after[i + 1]}`, after[i + 2]);
-    let delta = 0;
-    for (let i = 0; i < before.length; i += 4) {
-      delta = Math.max(delta, Math.abs(before[i + 2] - (radii.get(`${before[i]},${before[i + 1]}`) ?? 0)));
-    }
-    assert.ok(delta >= 1, `Existing cloud radius changed by only ${delta.toFixed(4)}px in its first frame`);
-    console.log(`  Meadow move fixture (seed 1337, warp 0): first-frame radius change ${delta.toFixed(2)}px`);
-  },
-  'hiding clouds remains visible on the first frame and clears within 200ms'(h) {
+  'hiding clouds remains visible on the first frame and clears on completion'(h) {
     h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons([]); h.advance(33);
     const firstFrame = h.cloudCircles();
     assert.ok(firstFrame.some((value, i) => i % 4 === 2 && value >= 2), 'Clouds must shrink over frames instead of vanishing in one frame');
-    h.advance(167);
-    assert.equal(h.cloudCircles().length, 0, 'Hidden icon clouds should clear within 200ms');
+    h.advance(1767);
+    assert.equal(h.cloudCircles().length, 0, 'Hidden icon clouds should clear by the end of the transition');
   },
   'intro retains its gradual 2600ms quadratic timing'(h) {
     h.startHosted(); h.hostIcons(A); h.advance(300);
@@ -348,12 +329,13 @@ const meadowResponseScenarios = {
     assert.ok(Math.abs(h.snapshot().mix - 0.5) < 1e-9, 'Intro midpoint should stay at half mix');
     h.advance(1300); assert.equal(h.snapshot().mix, 1);
   },
-  'interrupting the intro switches smoothly to interactive response'(h) {
+  'interrupting the intro preserves continuity and the original interactive duration'(h) {
     h.startHosted(); h.hostIcons(A); h.advance(650);
     const before = h.snapshot(); h.hostIcons(B); continuity(h, before, 'intro → interactive move');
-    h.advance(300);
-    assert.ok(h.snapshot().mix >= 0.7, 'New icon target should use the responsive interactive curve');
-    h.advance(300); assert.equal(h.snapshot().mix, 1, 'Retargeted intro should finish on interactive timing');
+    h.advance(450);
+    assert.ok(Math.abs(h.snapshot().mix - 0.125) < 1e-9, 'Retargeted intro should use the original interactive curve');
+    h.advance(1349); assert.ok(h.snapshot().mix < 1, 'Retargeted intro must retain the full interactive duration');
+    h.advance(1); assert.equal(h.snapshot().mix, 1, 'Retargeted intro should complete at 1800ms');
   },
   'first frame timestamp before commit does not extrapolate the field'(h) {
     h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons(B);
@@ -377,7 +359,7 @@ for (const [name, file] of [['Beach', 'flat.html'], ['Meadow', 'meadow.html']]) 
     try { test(harness(file, { preview: true })); console.log(`PASS ${name}: ${scenario}`); }
     catch (error) { failures++; console.error(`FAIL ${name}: ${scenario}\n  ${error.message}`); }
   }
-  if (file === 'meadow.html') for (const [scenario, test] of Object.entries(meadowResponseScenarios)) {
+  if (file === 'meadow.html') for (const [scenario, test] of Object.entries(meadowTimingScenarios)) {
     cases++;
     try { test(harness(file)); console.log(`PASS ${name}: ${scenario}`); }
     catch (error) { failures++; console.error(`FAIL ${name}: ${scenario}\n  ${error.message}`); }

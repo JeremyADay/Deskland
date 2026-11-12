@@ -64,6 +64,15 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private let desktopPreview = DesktopPreview()
   private var terminationPending = false
   private var watchTimer: Timer?
+  private var mouseUpMonitor: Any?
+  private let traceInteractions = ProcessInfo.processInfo.environment["DESKLAND_TRACE_INTERACTIONS"] == "1"
+  private var interactionStartedAt: TimeInterval?
+  private lazy var interactionRefresh = InteractionRefresh { [weak self] in
+    guard let self, !self.terminationPending, self.policy.suspensions.isEmpty else { return }
+    // Uncovering must resume the scene before its new icon layout arrives.
+    self.watchWindows()
+    self.icons.refreshAfterInteraction()
+  }
   private var lastIcons: [[Int]] = []
   private var loggedIconCount: Int?
   private var loggedTrust: Bool?
@@ -132,6 +141,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
     guard !terminationPending else { return .terminateLater }
     terminationPending = true
+    stopInteractionMonitoring()
     watchTimer?.invalidate()
     watchTimer = nil
     icons.stop()
@@ -143,6 +153,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationWillTerminate(_ note: Notification) {
+    stopInteractionMonitoring()
     watchTimer?.invalidate()
     icons.stop()
     page?.close()
@@ -205,6 +216,11 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
     lastIcons = rects
     if let page { sendIcons(to: page) }
+    if let started = interactionStartedAt {
+      Log.line(String(format: "mouse-up to changed icon layout: %.1f ms",
+        (ProcessInfo.processInfo.systemUptime - started) * 1000))
+      interactionStartedAt = nil
+    }
     scheduleDesktopPreview()
   }
 
@@ -231,6 +247,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func updatePolling() {
+    updateInteractionMonitoring()
     if policy.pollWindows {
       if watchTimer == nil {
         // The windows may have changed while manually paused, asleep or locked. Sample before
@@ -246,6 +263,31 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
       watchTimer = nil
     }
     icons.setMode(policy.iconMode)
+  }
+
+  private func updateInteractionMonitoring() {
+    guard !terminationPending, policy.suspensions.isEmpty else {
+      stopInteractionMonitoring()
+      return
+    }
+    guard mouseUpMonitor == nil else { return }
+    // Observe releases without consuming clicks or retaining event contents. Finder may publish
+    // the drop or desktop visibility change just after mouse-up, so recheck briefly afterwards.
+    mouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+      guard let self else { return }
+      if self.traceInteractions {
+        self.interactionStartedAt = ProcessInfo.processInfo.systemUptime
+        Log.line("mouse-up: immediate desktop refresh requested")
+      }
+      self.interactionRefresh.trigger()
+    }
+  }
+
+  private func stopInteractionMonitoring() {
+    if let mouseUpMonitor { NSEvent.removeMonitor(mouseUpMonitor) }
+    mouseUpMonitor = nil
+    interactionStartedAt = nil
+    interactionRefresh.cancel()
   }
 
   /// Whether one ordinary window covers essentially the whole main screen (a zoomed or full

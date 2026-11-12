@@ -214,6 +214,7 @@ Developer checks (no preference changes):
 
 ```sh
 tools/test-mac-icon-visibility.sh
+tools/test-mac-interaction.sh
 tools/test-wallpaper-restore.sh
 ```
 
@@ -221,10 +222,17 @@ The native `--selftest-demo` checks hiding and revealing icon layouts while paus
 The Node transition checks exercise interrupted reveals, hides and repeated moves using the actual
 field and texture-upload code. New targets start from the currently displayed blend. Pausing a
 partly completed transition freezes it; new icon layouts received while paused still update once.
-Meadow uses 450 ms interactive transitions: its cloud edges concealed much of the previous
-1800 ms animation. The smooth easing and initial 2600 ms opening remain. These are
-renderer durations after a message arrives, not mouse-to-screen latency; native icon polling
-still uses 0.1-second intervals during recent changes and 0.4 seconds when the desktop is stable.
+Both themes retain their original 1800 ms interactive transitions and 2600 ms opening. A passive
+global left-mouse-up listener requests an immediate coverage and icon refresh, then rechecks at
+50, 150 and 300 ms because Finder may publish a drop or visibility change after the release.
+Each release replaces pending follow-ups; an in-flight Finder read completes before one queued
+refresh, and unchanged layouts are not resent. Suspension and quit remove the listener and cancel
+the burst. The listener does not consume clicks or retain event contents. Unrelated clicks can
+also trigger this bounded work. Fallback icon polling remains at 0.1 seconds during recent changes
+and 0.4 seconds when stable; paused visibility checks remain at two seconds.
+For onset diagnostics, launch the host with `DESKLAND_TRACE_INTERACTIONS=1`. It logs each observed
+mouse-up and elapsed time to the next changed icon layout, without event coordinates or file
+details. This measures host notification timing, not when GPU pixels reach the display.
 
 ## Known gaps
 
@@ -368,9 +376,12 @@ macOS 隐藏桌面图标时，Finder 可能仍返回原来的位置。宿主检�
 普通窗口遮挡只触发暂停；草地在暂停期间也会单次更新静态布局。自然飘动的云和角色仍然保留。
 图标更新打断过渡时，从当前显示的中间形状继续；暂停会冻结正在过渡的形状，恢复时继续。
 暂停期间收到新的图标布局仍会单次更新。`node tools/tests/test_terrain_transitions.mjs` 验证这些行为。
-草地的交互过渡缩短为 450 毫秒，避免原来 1800 毫秒过渡时云边迟迟不变；保留平滑缓动，
-首次打开仍为 2600 毫秒。这是收到消息后的渲染时长，不含原生图标轮询的等待（近期变化时 0.1 秒，
-稳定时 0.4 秒）。
+两个主题保留原来的 1800 毫秒交互过渡与 2600 毫秒开场。被动监听全局鼠标左键释放后立即检查
+遮挡与图标，并在 50、150、300 毫秒补查 Finder 稍后发布的拖放或可见性变化。新的释放替换
+待执行的补查；正在进行的 Finder 读取完成后立即处理一次合并请求，不重发未变化的布局。
+休眠、锁屏等挂起状态以及退出时移除监听并取消补查。监听不拦截点击、不保存事件内容；其他
+应用中的点击也可能触发这组有上限的检查。保留原来的 0.1/0.4 秒轮询和暂停时每两秒的可见性检查。
+`tools/test-mac-interaction.sh` 验证补查合并、取消和生命周期。
 
 叶子菜单中的“同步新建桌面预览”默认关闭；开启后以当前主题的静帧更新 Mission Control 的“+”预览。
 仅在场景和布局变化稳定后捕获应用自己的网页，不持续截屏。关闭功能或正常退出时，通过本地恢复
