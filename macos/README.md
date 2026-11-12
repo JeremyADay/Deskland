@@ -140,6 +140,14 @@ if needed and opens a normal window with sample icons; it does not require Acces
 The Demo menu switches themes (⌘1/⌘2), pauses (⌘P), moves sample icons (⌘M), and reloads (⌘R).
 Close the window or use ⌘Q to quit. Launch the app without arguments for the actual wallpaper.
 
+For shared-theme development, quit the wallpaper and run `tools/wallpaper-mac.command` (or
+double-click it in Finder). It copies this checkout's `prototype/` assets into the app's own support
+folder and points the existing host there through `DESKLAND_PAGES`, building only if the app is
+missing. This lets the host read the theme assets without access to the source Documents folder.
+Quit and rerun the launcher after editing themes; opening the app directly uses its bundled pages.
+Theme-only edits do not rebuild or change the host's signature.
+Swift host changes still require a build and may require the Accessibility reset described above.
+
 ```sh
 tools/make-mac.sh
 A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
@@ -150,6 +158,7 @@ mkdir -p .capture/profiles
 python3 tools/profile-mac-resources.py .capture/profiles/resources.json -- \
   "$A" --profile meadow .capture/profiles/frames.json
 tools/test-mac-policy.sh
+node tools/tests/test_terrain_transitions.mjs
 "$A" --selftest-demo .capture/demo-tests
 ```
 
@@ -209,6 +218,9 @@ tools/test-wallpaper-restore.sh
 ```
 
 The native `--selftest-demo` checks hiding and revealing icon layouts while paused in both themes.
+The Node transition checks exercise interrupted reveals, hides and repeated moves using the actual
+field and texture-upload code. New targets start from the currently displayed blend. Pausing a
+partly completed transition freezes it; new icon layouts received while paused still update once.
 
 ## Known gaps
 
@@ -326,6 +338,12 @@ A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
 双击 `tools/demo-mac.command` 可打开普通演示窗口，无需辅助功能权限。菜单支持切换主题（⌘1/⌘2）、
 暂停（⌘P）、移动示例图标（⌘M）、重载（⌘R）和退出（⌘Q）。不带参数启动应用仍是桌面壁纸模式。
 
+开发共享主题时，先退出壁纸，再运行或双击 `tools/wallpaper-mac.command`。它将仓库的 `prototype/`
+资源复制到应用自己的支持目录，再通过 `DESKLAND_PAGES` 让现有宿主读取副本，仅在应用不存在时
+构建。宿主无需读取“文稿”中的源目录。编辑主题后退出并重新运行脚本；直接打开应用仍读取包内
+页面。只改主题无需重建或更改签名。
+修改 Swift 宿主仍需构建，且可能需要按上文重置辅助功能权限。
+
 `--profile <meadow|beach> <out.json> [--no-icons]` 按当前主屏幕逻辑尺寸与缩放比例，在屏幕外测量
 运行、暂停及恢复后的帧数、rAF 回调、同步 GPU 读回和回调耗时；这不是 GPU 执行时间或能耗测量。
 `tools/profile-mac-resources.py` 可同时采样宿主及新建 WebKit 进程的 CPU、唤醒和内存；运行期间
@@ -344,6 +362,8 @@ A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
 macOS 隐藏桌面图标时，Finder 可能仍返回原来的位置。宿主检查 Finder 与 WindowManager 在
 桌面图标层的前后关系，只读几何与可见性元数据。隐藏时清空主题中的图标布局，显示时恢复。
 普通窗口遮挡只触发暂停；草地在暂停期间也会单次更新静态布局。自然飘动的云和角色仍然保留。
+图标更新打断过渡时，从当前显示的中间形状继续；暂停会冻结正在过渡的形状，恢复时继续。
+暂停期间收到新的图标布局仍会单次更新。`node tools/tests/test_terrain_transitions.mjs` 验证这些行为。
 
 叶子菜单中的“同步新建桌面预览”默认关闭；开启后以当前主题的静帧更新 Mission Control 的“+”预览。
 仅在场景和布局变化稳定后捕获应用自己的网页，不持续截屏。关闭功能或正常退出时，通过本地恢复

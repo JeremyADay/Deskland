@@ -754,18 +754,25 @@ const iconRects = () => icons.map(ic => ({ cx: ic.x + ic.w / 2, cy: ic.y + ic.h 
 function commit(fromEmpty = false) {
   const nf = computeField(iconRects());
   const target = 1 - toI;
-  if (fromEmpty) { FA = computeField([]); uploadField(toI, FA); }
-  else FA = FB;
+  if (fromEmpty || !FA || !FB) { FA = computeField([]); uploadField(toI, FA); }
+  else if (curMix < 1) {
+    // 新图标消息从上一帧实际显示的岸线继续，不跳到尚未完成的目标。
+    const s = new Float32Array(FB.s.length), mix = curMix;
+    for (let i = 0; i < s.length; i++) s[i] = FA.s[i] * (1 - mix) + FB.s[i] * mix;
+    FA = { s };
+    uploadField(toI, FA);
+  } else FA = FB;
   FB = nf;
   uploadField(target, FB);
   fromI = toI; toI = target;
+  curMix = 0;                                    // 同一帧内再次更新时也从当前岸线继续
   morphT0 = performance.now();
   morphDur = fromEmpty ? 2600 : MORPH_MS;
 }
 function refresh() {
   FA = FB = computeField(iconRects());
   uploadField(toI, FB);
-  fromI = toI; morphT0 = -1e9;
+  fromI = toI; morphT0 = -1e9; curMix = 1;
 }
 
 /* ======================================================================
@@ -1246,14 +1253,26 @@ function startHostedMode() {
   icons = [];
   commit(true);                                   // 先是一片海
   syncBirds(false);
-  let first = true;
+  let first = true, firstIconsFrame = -1;
   const settlePaused = () => {
     if (!paused || !iconsSeen) return;
     curMix = 1; morphT0 = -1e9;                  // 暂停只冻结动画，首次地形和图标布局仍要完成
     draw(performance.now());
   };
   const handle = m => {
-    if (m.t === 'pause') { paused = PREVIEW ? false : m.v; settlePaused(); return; }
+    if (m.t === 'pause') {
+      const next = PREVIEW ? false : m.v;
+      if (next === paused) return;
+      if (!next && curMix < 1) {
+        // 从实际显示的混合比例恢复时钟；分享功能也可能临时修改 paused。
+        const progress = curMix < 0.5 ? Math.sqrt(curMix / 2) : 1 - Math.sqrt((1 - curMix) / 2);
+        morphT0 = performance.now() - progress * morphDur;
+      }
+      paused = next;
+      // 首次布局尚未绘制时补上静态画面；已在过渡的岸线只冻结，不跳到终点。
+      if (paused && frameN === firstIconsFrame) settlePaused();
+      return;
+    }
     if (m.t === 'settings') { applySettings(m.v || {}); return; }
     if (m.t === 'reset') { applySettings(Object.assign({}, DEFAULTS, m.v || {})); return; }
     if (m.t !== 'icons') return;
@@ -1261,6 +1280,7 @@ function startHostedMode() {
     icons = m.vis ? m.r.map(([l, t, r, b]) => ({ x: l / k, y: t / k, w: (r - l) / k, h: (b - t) / k })) : [];
     if (PREVIEW) drawGhosts();
     iconsSeen = true;
+    if (first) firstIconsFrame = frameN;
     commit(first);                                // 第一次：陆地从海里"长"出来；之后：岸线平滑移动
     if (first) { curMix = 1; kayaks.length = 0; syncKayaks(); curMix = 0; first = false; }
     settlePaused();
