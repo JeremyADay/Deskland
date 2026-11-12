@@ -60,8 +60,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var themeItems: [Theme: NSMenuItem] = [:]
   private let pauseItem = NSMenuItem(title: Strings.pause, action: #selector(togglePause), keyEquivalent: "")
   private let grantItem = NSMenuItem(title: Strings.own("grant"), action: #selector(grantAccess), keyEquivalent: "")
+  private let previewItem = NSMenuItem(title: Strings.own("desktopPreview"), action: #selector(toggleDesktopPreview), keyEquivalent: "")
+  private let desktopPreview = DesktopPreview()
+  private var terminationPending = false
   private var watchTimer: Timer?
   private var lastIcons: [[Int]] = []
+  private var loggedIconCount: Int?
+  private var loggedTrust: Bool?
   /// The pause the page was last told, or nil when it has not been told yet.
   private var sentPause: Bool?
   private var policy = HostPolicy()
@@ -73,16 +78,32 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationDidFinishLaunching(_ note: Notification) {
+    desktopPreview.start()
     addMenu()
     buildWindow()
     icons.onChange = { [weak self] rects in self?.iconsChanged(rects) }
-    icons.onTrust = { [weak self] trusted in self?.grantItem.isHidden = trusted }
+    icons.onTrust = { [weak self] trusted in
+      guard let self else { return }
+      self.grantItem.isHidden = trusted
+      if self.loggedTrust != trusted {
+        self.loggedTrust = trusted
+        Log.line(trusted ? "Accessibility granted" : "Accessibility required for desktop icon positions")
+      }
+    }
+    let trusted = Accessibility.trusted
+    loggedTrust = trusted
+    Log.line(trusted ? "Accessibility granted" : "Accessibility required for desktop icon positions")
 
     NotificationCenter.default.addObserver(
       self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
     // Nothing to draw while the display sleeps, the session is switched away, the screen is
     // locked or the screen saver runs.
     let workspace = NSWorkspace.shared.notificationCenter
+    workspace.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+      guard let self else { return }
+      self.icons.resend()
+      self.scheduleDesktopPreview(spaceChanged: true)
+    }
     for (name, reason, suspended) in [
       (NSWorkspace.screensDidSleepNotification, HostPolicy.Suspension.displaySleep, true),
       (NSWorkspace.screensDidWakeNotification, .displaySleep, false),
@@ -107,8 +128,20 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     updatePause()
   }
 
-  /// Quit (from the menu, a log out or a plain `kill`) takes the wallpaper window away first, so the
-  /// normal desktop picture is back at once. macOS would remove it with the process anyway.
+  /// Quit waits for any native preview restoration before macOS removes the wallpaper window.
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard !terminationPending else { return .terminateLater }
+    terminationPending = true
+    watchTimer?.invalidate()
+    watchTimer = nil
+    icons.stop()
+    desktopPreview.stop {
+      // Always reply on a later runloop turn, after applicationShouldTerminate returned.
+      RunLoop.main.perform(inModes: [.common]) { sender.reply(toApplicationShouldTerminate: true) }
+    }
+    return .terminateLater
+  }
+
   func applicationWillTerminate(_ note: Notification) {
     watchTimer?.invalidate()
     icons.stop()
@@ -152,6 +185,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
       self.sendIcons(to: page)
       self.sentPause = nil
       self.updatePause()
+      self.scheduleDesktopPreview()
       Log.line("\(page.theme.rawValue) ready")
     }
     page.onError = { text in Log.line("page: \(text)") }
@@ -165,22 +199,34 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func iconsChanged(_ rects: [[Int]]) {
+    if loggedIconCount != rects.count {
+      loggedIconCount = rects.count
+      Log.line("visible desktop icon count: \(rects.count)")
+    }
     lastIcons = rects
     if let page { sendIcons(to: page) }
+    scheduleDesktopPreview()
+  }
+
+  private func scheduleDesktopPreview(spaceChanged: Bool = false) {
+    guard !terminationPending else { return }
+    desktopPreview.schedule(page: page, screen: NSScreen.screens.first, spaceChanged: spaceChanged)
   }
 
   @objc private func screensChanged() {
-    guard let screen = NSScreen.screens.first, screen.frame != mainFrame else { return }
+    guard let screen = NSScreen.screens.first else { return }
     mainFrame = screen.frame
     window?.setFrame(screen.frame, display: true)
     // The page measures itself on resize; the icons are read again for the new arrangement.
     icons.resend()
+    scheduleDesktopPreview()
   }
 
   // MARK: - Pause
 
   private func setSuspended(_ reason: HostPolicy.Suspension, _ suspended: Bool) {
     policy.setSuspended(reason, suspended)
+    desktopPreview.setSuspended(!policy.suspensions.isEmpty)
     updatePause()
   }
 
@@ -239,6 +285,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     guard pause != sentPause else { return }
     sentPause = pause
     page.send(["t": "pause", "v": pause])
+    if !pause { scheduleDesktopPreview() }
     Log.line(pause ? "paused" : "playing")
   }
 
@@ -273,6 +320,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let reload = NSMenuItem(title: Strings.reload, action: #selector(reloadPage), keyEquivalent: "")
     reload.target = self
     menu.addItem(reload)
+    previewItem.target = self
+    menu.addItem(previewItem)
     menu.addItem(.separator())
     grantItem.target = self
     grantItem.isHidden = Accessibility.trusted
@@ -290,6 +339,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   func menuWillOpen(_ menu: NSMenu) {
     for (choice, entry) in themeItems { entry.state = choice == theme ? .on : .off }
     pauseItem.state = policy.manualPause ? .on : .off
+    previewItem.state = desktopPreview.enabled ? .on : .off
     grantItem.isHidden = Accessibility.trusted
   }
 
@@ -307,6 +357,12 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   @objc private func reloadPage() {
     sentPause = nil
     page?.reload()
+  }
+
+  @objc private func toggleDesktopPreview() {
+    guard !terminationPending else { return }
+    desktopPreview.setEnabled(!desktopPreview.enabled)
+    scheduleDesktopPreview()
   }
 
   @objc private func grantAccess() { Accessibility.ask() }

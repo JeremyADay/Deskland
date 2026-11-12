@@ -46,7 +46,9 @@ Simplified Chinese when the Mac's preferred language is Chinese, otherwise Engli
 Finder only tells another app where the desktop icons are through Accessibility. Choose Grant
 Accessibility… in the menu, or turn on **Deskland Preview** in System Settings > Privacy & Security
 > Accessibility. The scene forms around the icons within about 2 s, without a relaunch. Because the
-app is signed ad hoc, a rebuilt copy may need the switch turned off and on again.
+app is signed ad hoc, a rebuilt copy may need the switch turned off and on again. If the menu still
+shows **Grant Accessibility…**, remove the stale entry with **−**, add the rebuilt app with **+**,
+then enable it. Make sure you choose the same app copy that is running.
 
 Without the permission the host sends an empty icon list, so the page still shows its scene (open sea
 on the Beach, drifting clouds on the Meadow), and it checks every 2 s whether access has been granted.
@@ -56,8 +58,9 @@ on the Beach, drifting clouds on the Meadow), and it checks every 2 s whether ac
 - Read: the **position and size** of each desktop icon (Finder's desktop, main screen only), and the
   position and size of on-screen windows (to decide when to pause).
 - Never read: icon names, file names, paths, window titles or contents, or any other attribute. No
-  action is ever performed on an icon. No network, no screenshots, nothing written except the
-  chosen theme, the instance lock and short status lines in the system log (`deskland: …`).
+  action is ever performed on an icon. No network or desktop screenshots. The host writes preferences, the instance lock and short status
+  lines in the system log (`deskland: …`). Optional desktop-preview matching saves only the
+  rendered theme and a local wallpaper-restoration journal, as described below.
 
 ## How it talks to the pages
 
@@ -158,11 +161,43 @@ resize, pause/resume, reload and the existing share-snapshot bridge, saves image
 It does not move real Finder icons or change system permissions. Actual sleep/wake, Spaces,
 Stage Manager, multiple displays and permission revocation still need interactive testing.
 
-The host keeps only a message counter, checks icon permission every two seconds when paused,
-and stops icon/window polling during sleep, lock, inactive-session or screen-saver suspension.
+The host keeps only a message counter, checks icon permission and visibility every two seconds when paused,
+and reads Finder positions once when icons reappear rather than continuously while paused.
+It stops icon/window polling during sleep, lock, inactive-session or screen-saver suspension.
 Independent suspension reasons prevent a display-wake event from clearing an active lock.
 The theme pages skip hidden diagnostic GPU readbacks and DOM timers in wallpaper/preview mode;
 explicit `__dbg.bench()` and ordinary browser diagnostics remain available.
+
+## Hidden desktop icons and the new-desktop preview
+
+When macOS hides desktop items after clicking the wallpaper, Finder may still expose their AX
+rectangles. The host also checks the ordering of Finder and WindowManager desktop-icon windows,
+using geometry and visibility metadata only. A hiding layer clears the icon rectangles sent to the
+scene; revealing the icons restores them. Normal application windows only pause animation. Meadow
+also redraws its static layout once when an icon update arrives while paused, matching Beach.
+Natural drifting clouds and characters remain; the dense shapes tied to hidden icons disappear.
+
+The leaf menu's **Match new desktop preview** option makes Mission Control's “+” thumbnail match
+the selected scene. It is off by default. When enabled, the host snapshots only its WKWebView after
+scene/layout changes have settled and uses the public desktop-picture API to update macOS. There
+is no periodic screenshot loop. The thumbnail is a still frame; the wallpaper window stays animated.
+
+The public API cannot preserve all original dynamic-wallpaper and Space settings by itself. Before
+changing anything, the host saves a local recovery journal. On disable or normal quit it merges back
+only settings still owned by its snapshots, preserving a wallpaper the user selected meanwhile.
+New Spaces that inherited an app snapshot return to their underlying wallpaper settings too.
+Exact restoration uses the versioned macOS wallpaper store format; unsupported or malformed state
+stops syncing. Forced termination leaves recovery for the next launch. Snapshot files still referenced
+by macOS are retained. This is an experimental integration, not a public all-Spaces wallpaper API.
+
+Developer checks (no preference changes):
+
+```sh
+tools/test-mac-icon-visibility.sh
+tools/test-wallpaper-restore.sh
+```
+
+The native `--selftest-demo` checks hiding and revealing icon layouts while paused in both themes.
 
 ## Known gaps
 
@@ -217,15 +252,16 @@ tools/make-mac.sh <目录>      # 或生成 "<目录>/Deskland Preview.app"
 
 Finder 只通过辅助功能告诉其他程序桌面图标的位置。在菜单中选择“授予辅助功能权限…”，或在 系统设置 >
 隐私与安全性 > 辅助功能 中打开 **Deskland Preview**。约 2 秒内场景就会围绕图标生成，无需重启。由于
-是临时签名，重新构建后可能需要把开关关掉再打开。
+是临时签名，重新构建后可能需要把开关关掉再打开。如果菜单仍显示“授予辅助功能权限…”，请用
+“−”移除旧条目，再用“+”添加重新构建的应用并启用，确保添加的是当前运行的副本。
 
 未授权时宿主发送空的图标列表，页面仍显示场景（沙滩为开阔海面，草地为漂浮的云），并每 2 秒检查一次是否已授权。
 
 #### 读取什么，绝不读取什么
 
 - 读取：每个桌面图标的**位置和大小**（Finder 桌面，仅主屏幕），以及屏幕上窗口的位置和大小（用于判断何时暂停）。
-- 绝不读取：图标名称、文件名、路径、窗口标题或内容等任何其他属性。不会对图标执行任何操作。不联网、
-  不截屏，除所选主题、单实例锁和系统日志中的简短状态行（`deskland: …`）外不写入任何内容。
+- 绝不读取：图标名称、文件名、路径、窗口标题或内容。不会对图标执行任何操作，不联网，也不截取桌面或其他应用。
+  除设置、单实例锁和简短日志外，可选的桌面预览同步会保存主题渲染图及本地恢复记录。
 
 ### 与页面的通信
 
@@ -278,5 +314,18 @@ A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
 验证两主题的移动、缩放、暂停恢复、重载及分享图片消息并保存结果，然后退出。它不操作真实图标或
 修改系统权限；实际休眠唤醒、空间、台前调度、多显示器及权限撤销仍需人工验证。
 
-宿主仅保留消息计数，暂停时只每两秒检查权限，休眠、锁屏、会话停用或屏保期间停止轮询。
+宿主仅保留消息计数，暂停时每两秒检查权限与可见性，图标重新显示时只读取一次 Finder 位置。
+休眠、锁屏、会话停用或屏保期间停止轮询。
 各暂停原因独立维护。壁纸与预览模式跳过隐藏诊断的 GPU 读回及 DOM 计时器，显式性能测试仍可使用。
+
+### 隐藏桌面图标与新增桌面预览
+
+macOS 隐藏桌面图标时，Finder 可能仍返回原来的位置。宿主检查 Finder 与 WindowManager 在
+桌面图标层的前后关系，只读几何与可见性元数据。隐藏时清空主题中的图标布局，显示时恢复。
+普通窗口遮挡只触发暂停；草地在暂停期间也会单次更新静态布局。自然飘动的云和角色仍然保留。
+
+叶子菜单中的“同步新建桌面预览”默认关闭；开启后以当前主题的静帧更新 Mission Control 的“+”预览。
+仅在场景和布局变化稳定后捕获应用自己的网页，不持续截屏。关闭功能或正常退出时，通过本地恢复
+记录还原仍归应用所有的壁纸设置，保留用户随后选择的新壁纸。继承了应用静帧的新空间也会恢复
+原有壁纸继承关系。精确恢复依赖 macOS 壁纸配置格式；
+状态不支持或损坏时停止同步，强制退出后在下次启动恢复。仍被系统引用的图片会保留。

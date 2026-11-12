@@ -12,6 +12,24 @@ let app = NSApplication.shared
 let delegate: NSApplicationDelegate
 var signalSources: [DispatchSourceSignal] = []
 
+func installTerminationSignalHandlers() {
+  var requested = false
+  for sig in [SIGTERM, SIGINT] {
+    signal(sig, SIG_IGN)
+    let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+    source.setEventHandler {
+      guard !requested else { return }
+      requested = true
+      // AppKit may enter a nested event loop for terminateLater. Return from this dispatch
+      // callback first, so the main queue can deliver asynchronous restoration callbacks.
+      let timer = Timer(timeInterval: 0, repeats: false) { _ in NSApp.terminate(nil) }
+      RunLoop.main.add(timer, forMode: .common)
+    }
+    source.resume()
+    signalSources.append(source)
+  }
+}
+
 func usage() -> Never {
   FileHandle.standardError.write(Data("""
     usage: Deskland                        the wallpaper, with a menu bar item
@@ -55,13 +73,7 @@ case nil:
     exit(0)
   }
   // `kill` / Ctrl-C quit like the menu does, so the window is taken away the same way.
-  for sig in [SIGTERM, SIGINT] {
-    signal(sig, SIG_IGN)
-    let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
-    source.setEventHandler { NSApp.terminate(nil) }
-    source.resume()
-    signalSources.append(source)
-  }
+  installTerminationSignalHandlers()
   delegate = Controller()
   app.setActivationPolicy(.accessory)
 default:
