@@ -1112,8 +1112,14 @@ function startHostedMode() {
   icons = [];
   commit(true);                                   // 先是一片草地（还不知道图标在哪）
   let first = true;
+  const settlePaused = () => {
+    if (!paused || !iconsSeen) return;
+    // 暂停冻结动画，但隐藏/显示桌面图标后仍应更新一次静态云层。
+    curMix = 1; morphT0 = -1e9; massList = null;
+    draw(performance.now());
+  };
   const handle = m => {
-    if (m.t === 'pause') { paused = PREVIEW ? false : m.v; return; }
+    if (m.t === 'pause') { paused = PREVIEW ? false : m.v; settlePaused(); return; }
     if (m.t === 'settings') { applySettings(m.v || {}); return; }
     if (m.t === 'reset') { applySettings(Object.assign({}, DEFAULTS, m.v || {})); return; }
     if (m.t !== 'icons') return;
@@ -1123,6 +1129,7 @@ function startHostedMode() {
     iconsSeen = true;
     commit(first);                                // 第一次：云慢慢长出来；之后：云跟着图标平滑移动
     first = false;
+    settlePaused();
   };
   if (PREVIEW) {
     addEventListener('message', ev => { if (ev.source === parent) handle(typeof ev.data === 'string' ? JSON.parse(ev.data) : ev.data); });

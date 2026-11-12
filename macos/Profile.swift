@@ -389,7 +389,8 @@ final class SceneDemo: NSObject, NSApplicationDelegate, NSWindowDelegate {
     page?.view.evaluateJavaScript("""
       JSON.stringify({frame:frameN, icons:icons.map(({x,y,w,h})=>[x,y,w,h]),
         canvas:[cv.width,cv.height], box:[cv.getBoundingClientRect().width,cv.getBoundingClientRect().height],
-        viewport:[innerWidth,innerHeight], dpr:devicePixelRatio, paused, href:location.href,
+        viewport:[innerWidth,innerHeight], dpr:devicePixelRatio, paused, href:location.href, mix:curMix,
+        iconCloudCircles:typeof massList !== 'undefined' && massList ? massList.length/4 : null,
         diagnosticReadbacks:window.__demoDiagnostics ? window.__demoDiagnostics.readbacks : null,
         ghosts:document.querySelectorAll('#ghosts .ghost').length,
         ghostsVisible:!!document.getElementById('ghosts') && getComputedStyle(document.getElementById('ghosts')).display!=='none'})
@@ -450,16 +451,40 @@ final class SceneDemo: NSObject, NSApplicationDelegate, NSWindowDelegate {
               self.probe { pausedEnd in
                 self.check("pause stops rendered frames", pausedEnd["paused"] as? Bool == true &&
                            (pausedStart["frame"] as? Int) == (pausedEnd["frame"] as? Int))
-                self.togglePause()
-                self.later(0.8) {
-                  self.probe { resumed in
-                    self.check("resume restarts rendering", resumed["paused"] as? Bool == false &&
-                               (resumed["frame"] as? Int ?? 0) > (pausedEnd["frame"] as? Int ?? 0))
-                    self.testShare(expectedSize: expected)
+                self.testHiddenIcons {
+                  self.togglePause()
+                  self.later(0.8) {
+                    self.probe { resumed in
+                      self.check("resume restarts rendering", resumed["paused"] as? Bool == false &&
+                                 (resumed["frame"] as? Int ?? 0) > (pausedEnd["frame"] as? Int ?? 0))
+                      self.testShare(expectedSize: expected)
+                    }
                   }
                 }
               }
             }
+          }
+        }
+      }
+    }
+  }
+
+  private func testHiddenIcons(_ completion: @escaping () -> Void) {
+    // Mirror the native host when WindowManager hides Finder's icons, including while paused.
+    page?.send(["t": "icons", "vis": true, "r": [] as [[Int]]])
+    later(0.25) { [weak self] in
+      guard let self else { return }
+      self.probe { hidden in
+        self.check("hidden icons clear paused terrain", (hidden["icons"] as? [[Double]])?.isEmpty == true &&
+                   hidden["paused"] as? Bool == true && (hidden["mix"] as? Double) == 1)
+        if self.theme == .meadow {
+          self.check("hidden icons remove cached cloud shapes", hidden["iconCloudCircles"] as? Int == 0)
+        }
+        self.sendIcons {
+          self.probe { shown in
+            self.check("revealed icons restore paused terrain", (shown["icons"] as? [[Double]])?.count == 9 &&
+                       (shown["mix"] as? Double) == 1)
+            completion()
           }
         }
       }
