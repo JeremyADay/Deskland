@@ -64,9 +64,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var lastIcons: [[Int]] = []
   /// The pause the page was last told, or nil when it has not been told yet.
   private var sentPause: Bool?
-  private var manualPause = false
-  private var awake = true
-  private var covered = false
+  private var policy = HostPolicy()
   private var mainFrame = NSRect.zero
 
   private var theme: Theme {
@@ -79,31 +77,34 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     buildWindow()
     icons.onChange = { [weak self] rects in self?.iconsChanged(rects) }
     icons.onTrust = { [weak self] trusted in self?.grantItem.isHidden = trusted }
-    icons.start()
 
     NotificationCenter.default.addObserver(
       self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
     // Nothing to draw while the display sleeps, the session is switched away, the screen is
     // locked or the screen saver runs.
     let workspace = NSWorkspace.shared.notificationCenter
-    for (name, value) in [
-      (NSWorkspace.screensDidSleepNotification, false), (NSWorkspace.screensDidWakeNotification, true),
-      (NSWorkspace.sessionDidResignActiveNotification, false), (NSWorkspace.sessionDidBecomeActiveNotification, true),
+    for (name, reason, suspended) in [
+      (NSWorkspace.screensDidSleepNotification, HostPolicy.Suspension.displaySleep, true),
+      (NSWorkspace.screensDidWakeNotification, .displaySleep, false),
+      (NSWorkspace.sessionDidResignActiveNotification, .inactiveSession, true),
+      (NSWorkspace.sessionDidBecomeActiveNotification, .inactiveSession, false),
     ] {
-      workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.setAwake(value) }
+      workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        self?.setSuspended(reason, suspended)
+      }
     }
     let distributed = DistributedNotificationCenter.default()
-    for (name, value) in [
-      ("com.apple.screenIsLocked", false), ("com.apple.screenIsUnlocked", true),
-      ("com.apple.screensaver.didstart", false), ("com.apple.screensaver.didstop", true),
+    for (name, reason, suspended) in [
+      ("com.apple.screenIsLocked", HostPolicy.Suspension.locked, true),
+      ("com.apple.screenIsUnlocked", .locked, false),
+      ("com.apple.screensaver.didstart", .screenSaver, true),
+      ("com.apple.screensaver.didstop", .screenSaver, false),
     ] {
-      distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in self?.setAwake(value) }
+      distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+        self?.setSuspended(reason, suspended)
+      }
     }
-    // Windows covering the screen: a look twice a second, as the Windows host does.
-    let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.watchWindows() }
-    timer.tolerance = 0.1
-    RunLoop.main.add(timer, forMode: .common)
-    watchTimer = timer
+    updatePause()
   }
 
   /// Quit (from the menu, a log out or a plain `kill`) takes the wallpaper window away first, so the
@@ -178,15 +179,34 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   // MARK: - Pause
 
-  private func setAwake(_ value: Bool) {
-    awake = value
+  private func setSuspended(_ reason: HostPolicy.Suspension, _ suspended: Bool) {
+    policy.setSuspended(reason, suspended)
     updatePause()
+  }
+
+  private func updatePolling() {
+    if policy.pollWindows {
+      if watchTimer == nil {
+        // The windows may have changed while manually paused, asleep or locked. Sample before
+        // deciding whether to resume the page or restart Finder reads.
+        policy.covered = Self.screenCovered(mainFrame.size)
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.watchWindows() }
+        timer.tolerance = 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        watchTimer = timer
+      }
+    } else {
+      watchTimer?.invalidate()
+      watchTimer = nil
+    }
+    icons.setMode(policy.iconMode)
   }
 
   /// Whether one ordinary window covers essentially the whole main screen (a zoomed or full
   /// screen window). Positions and sizes only; window titles are never read.
   private func watchWindows() {
-    covered = Self.screenCovered(mainFrame.size)
+    guard policy.pollWindows else { return }
+    policy.covered = Self.screenCovered(mainFrame.size)
     updatePause()
   }
 
@@ -213,8 +233,9 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func updatePause() {
+    updatePolling()
     guard let page, page.ready else { return }
-    let pause = manualPause || !awake || covered
+    let pause = policy.paused
     guard pause != sentPause else { return }
     sentPause = pause
     page.send(["t": "pause", "v": pause])
@@ -268,7 +289,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func menuWillOpen(_ menu: NSMenu) {
     for (choice, entry) in themeItems { entry.state = choice == theme ? .on : .off }
-    pauseItem.state = manualPause ? .on : .off
+    pauseItem.state = policy.manualPause ? .on : .off
     grantItem.isHidden = Accessibility.trusted
   }
 
@@ -279,7 +300,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func togglePause() {
-    manualPause.toggle()
+    policy.manualPause.toggle()
     updatePause()
   }
 

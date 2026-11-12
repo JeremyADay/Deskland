@@ -32,77 +32,90 @@ final class DesktopIcons {
   /// Whether Accessibility is granted, when that changes (for the menu).
   var onTrust: (Bool) -> Void = { _ in }
 
-  /// As the Windows host: a look every 0.4 s, and every 0.1 s for 2 s after a change, so a
-  /// dragged icon is followed smoothly.
-  private static let slow = 0.4, fast = 0.1, quickFor = 2.0
-  /// Without the permission, how often to see whether it has been granted since.
-  private static let recheck = 2.0
   /// A busy Finder gets this long to answer one question.
   private static let patience: Float = 0.25
   private static let most = 600
 
   private var timer: Timer?
+  private var mode = IconPollingMode.stopped
+  /// In-flight AX requests cannot be cancelled. A result from an earlier mode must not update
+  /// the scene after pausing, stopping, or resuming with a different desktop arrangement.
+  private var generation = 0
   private var reading = false
-  private var lastLook = -Double.infinity
-  private var lastTrustCheck = -Double.infinity
   private var lastChange = -Double.infinity
   private(set) var trusted = false
   private var last: [[Int]]?
   private let queue = DispatchQueue(label: "deskland.icons", qos: .utility)
 
-  func start() {
-    guard timer == nil else { return }
-    trusted = Accessibility.trusted
-    onTrust(trusted)
-    if !trusted { report([]) }
-    let timer = Timer(timeInterval: Self.fast, repeats: true) { [weak self] _ in self?.tick() }
-    timer.tolerance = 0.03
-    RunLoop.main.add(timer, forMode: .common)
-    self.timer = timer
-  }
-
-  func stop() {
+  func setMode(_ next: IconPollingMode) {
+    guard next != mode else { return }
+    mode = next
+    generation += 1
     timer?.invalidate()
     timer = nil
+    lastChange = -Double.infinity
+    // An active transition reads immediately; a paused transition only checks permission.
+    tick()
   }
+
+  func stop() { setMode(.stopped) }
 
   /// Forgets the last list, so the next look is sent even if unchanged (after a page reload).
   func resend() {
     last = nil
-    lastLook = -Double.infinity
-    if !trusted { report([]) }
+    generation += 1
+    tick()
+  }
+
+  @discardableResult private func checkTrust() -> Bool {
+    let current = Accessibility.trusted
+    if current != trusted {
+      trusted = current
+      onTrust(current)
+    }
+    if !current { report([]) }
+    return current
+  }
+
+  private func schedule() {
+    timer?.invalidate()
+    timer = nil
+    let elapsed = ProcessInfo.processInfo.systemUptime - lastChange
+    guard let interval = mode.interval(trusted: trusted, sinceChange: elapsed) else { return }
+    let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in self?.tick() }
+    timer.tolerance = min(interval * 0.2, 0.1)
+    RunLoop.main.add(timer, forMode: .common)
+    self.timer = timer
   }
 
   private func tick() {
-    let now = ProcessInfo.processInfo.systemUptime
-    if !trusted {
-      guard now - lastTrustCheck >= Self.recheck else { return }
-      lastTrustCheck = now
-      guard Accessibility.trusted else { return }
-      trusted = true
-      onTrust(true)
-    }
-    let interval = now - lastChange < Self.quickFor ? Self.fast : Self.slow
-    guard !reading, now - lastLook >= interval - 0.02 else { return }
-    lastLook = now
-    // The permission taken away: say so, show the plain scene and go back to checking.
-    guard Accessibility.trusted else {
-      trusted = false
-      lastTrustCheck = now
-      onTrust(false)
-      report([])
+    timer?.invalidate()
+    timer = nil
+    guard mode != .stopped else { return }
+    guard checkTrust(), mode == .active else {
+      schedule()
       return
     }
+    // The outstanding request's callback will restart polling if its generation became stale.
+    guard !reading else { return }
     guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first
-    else { return }
+    else { schedule(); return }
     let pid = finder.processIdentifier
+    let requestGeneration = generation
     reading = true
     queue.async { [weak self] in
       let rects = Self.read(pid)
       DispatchQueue.main.async {
         guard let self else { return }
         self.reading = false
-        if let rects { self.report(Self.physical(rects)) }
+        guard requestGeneration == self.generation else {
+          if self.mode == .active { self.tick() }
+          return
+        }
+        guard self.mode == .active else { return }
+        // Permission can be revoked while Finder is answering.
+        if self.checkTrust(), let rects { self.report(Self.physical(rects)) }
+        self.schedule()
       }
     }
   }
