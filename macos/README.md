@@ -119,6 +119,51 @@ The scene test uses a 1728 × 1117 point web view at scale 2. It sends the setti
 `pause:false` once the page says `ready`, waits about 6.5 s, logs the page state (canvas size,
 WebGL2, `cap30`, measured fps) and writes a snapshot PNG. A watchdog exits 1 if anything stalls.
 
+## Local demo and profiling
+
+Double-click `tools/demo-mac.command` in Finder, or run it from the repository. It builds the app
+if needed and opens a normal window with sample icons; it does not require Accessibility.
+The Demo menu switches themes (⌘1/⌘2), pauses (⌘P), moves sample icons (⌘M), and reloads (⌘R).
+Close the window or use ⌘Q to quit. Launch the app without arguments for the actual wallpaper.
+
+```sh
+tools/make-mac.sh
+A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
+"$A" --demo beach
+mkdir -p .capture/profiles
+"$A" --profile meadow .capture/profiles/meadow.json
+"$A" --profile beach .capture/profiles/beach.json --no-icons
+python3 tools/profile-mac-resources.py .capture/profiles/resources.json -- \
+  "$A" --profile meadow .capture/profiles/frames.json
+tools/test-mac-policy.sh
+"$A" --selftest-demo .capture/demo-tests
+```
+
+The profile uses the main display's current logical dimensions and backing scale, a fixed seed,
+and nine sample icon rectangles (or none). Actors and some noise remain randomized, so repeat
+comparisons before attributing small CPU differences to a patch. After warmup it measures active, paused, and resumed
+phases. JSON records rendered FPS, rAF callbacks, synchronous readbacks, frame callback duration
+and frame interval distributions. Callback duration includes JavaScript and synchronous waits;
+it does not measure asynchronous GPU execution or energy use. The profile is offscreen and does
+not exercise Finder polling or desktop window coverage.
+
+The optional Python sampler uses macOS process counters for host CPU time, wakeups and memory,
+plus newly spawned WebKit processes. Keep other WebKit launches quiet during a run: attribution
+uses creation time because XPC processes belong to launchd. CPU 100% means one full core; summed
+physical footprints can count shared allocations twice. Reports remain under ignored `.capture/`.
+Full Xcode/Instruments is optional for deeper GPU and energy profiling.
+
+The demo integration test opens a temporary visible window, checks both themes, movement,
+resize, pause/resume, reload and the existing share-snapshot bridge, saves images/JSON, then exits.
+It does not move real Finder icons or change system permissions. Actual sleep/wake, Spaces,
+Stage Manager, multiple displays and permission revocation still need interactive testing.
+
+The host keeps only a message counter, checks icon permission every two seconds when paused,
+and stops icon/window polling during sleep, lock, inactive-session or screen-saver suspension.
+Independent suspension reasons prevent a display-wake event from clearing an active lock.
+The theme pages skip hidden diagnostic GPU readbacks and DOM timers in wallpaper/preview mode;
+explicit `__dbg.bench()` and ordinary browser diagnostics remain available.
+
 ## Known gaps
 
 - Main screen only, as on Windows: other displays keep their normal wallpaper.
@@ -218,3 +263,20 @@ A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
 - 暂无登录时自动启动选项。
 - 未正式签名（ad hoc）：下载的副本首次打开时 Gatekeeper 会提示，重新构建后可能需要重置辅助功能开关。
 - 暂停规则逐个窗口判断，多个窗口合起来覆盖屏幕时不会暂停（与 Windows 版相同）。
+
+### 本地演示与性能分析
+
+双击 `tools/demo-mac.command` 可打开普通演示窗口，无需辅助功能权限。菜单支持切换主题（⌘1/⌘2）、
+暂停（⌘P）、移动示例图标（⌘M）、重载（⌘R）和退出（⌘Q）。不带参数启动应用仍是桌面壁纸模式。
+
+`--profile <meadow|beach> <out.json> [--no-icons]` 按当前主屏幕逻辑尺寸与缩放比例，在屏幕外测量
+运行、暂停及恢复后的帧数、rAF 回调、同步 GPU 读回和回调耗时；这不是 GPU 执行时间或能耗测量。
+`tools/profile-mac-resources.py` 可同时采样宿主及新建 WebKit 进程的 CPU、唤醒和内存；运行期间
+避免启动其他 WebKit 应用，累计内存可能重复计算共享分配。结果请保存在忽略的 `.capture/` 目录。
+
+`tools/test-mac-policy.sh` 测试暂停原因叠加及轮询策略。`--selftest-demo <目录>` 会短暂打开窗口，
+验证两主题的移动、缩放、暂停恢复、重载及分享图片消息并保存结果，然后退出。它不操作真实图标或
+修改系统权限；实际休眠唤醒、空间、台前调度、多显示器及权限撤销仍需人工验证。
+
+宿主仅保留消息计数，暂停时只每两秒检查权限，休眠、锁屏、会话停用或屏保期间停止轮询。
+各暂停原因独立维护。壁纸与预览模式跳过隐藏诊断的 GPU 读回及 DOM 计时器，显式性能测试仍可使用。

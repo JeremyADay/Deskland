@@ -15,9 +15,12 @@ var signalSources: [DispatchSourceSignal] = []
 func usage() -> Never {
   FileHandle.standardError.write(Data("""
     usage: Deskland                        the wallpaper, with a menu bar item
-    developer self-tests (offscreen, nothing shown; see macos/README.md):
+    developer commands (selftest/profile offscreen; demo commands visible; see macos/README.md):
            Deskland --selftest <meadow|beach> <out.png> [--no-icons]
            Deskland --selftest-shim
+           Deskland --profile <meadow|beach> <out.json> [--no-icons]
+           Deskland --demo <meadow|beach>
+           Deskland --selftest-demo <output-directory>
 
     """.utf8))
   exit(2)
@@ -32,6 +35,19 @@ case "--selftest":
 case "--selftest-shim":
   delegate = ShimTest()
   app.setActivationPolicy(.accessory)
+case "--profile":
+  guard arguments.count >= 3, let theme = Theme(rawValue: arguments[1]) else { usage() }
+  delegate = SceneProfile(theme: theme, output: URL(fileURLWithPath: arguments[2]),
+                          withIcons: !arguments.contains("--no-icons"))
+  app.setActivationPolicy(.accessory)
+case "--demo":
+  guard arguments.count == 2, let theme = Theme(rawValue: arguments[1]) else { usage() }
+  delegate = SceneDemo(theme: theme)
+  app.setActivationPolicy(.regular)
+case "--selftest-demo":
+  guard arguments.count == 2 else { usage() }
+  delegate = SceneDemo(theme: .meadow, testOutput: URL(fileURLWithPath: arguments[1], isDirectory: true))
+  app.setActivationPolicy(.regular)
 case nil:
   // A second launch while the wallpaper runs leaves quietly. (The self-tests do not take the lock.)
   guard App.claimInstance() else {
