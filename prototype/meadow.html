@@ -151,7 +151,8 @@
    ====================================================================== */
 const CELL_W = 76, CELL_H = 100, GRID_X0 = 4, GRID_Y0 = 6, TASKBAR = 48;
 const STEP = 5;
-const MORPH_MS = 1800;
+// 云边会藏住过渡早期的小变化；缩短交互时长，同时保留平滑的长出和缩回。
+const MORPH_MS = 450;
 
 const QS = new URLSearchParams(location.search);
 const WALL = QS.has('wallpaper');      // 壁纸模式：桌面宿主加载，消息来自宿主
@@ -915,7 +916,7 @@ function frame(now) {
   const dt = lastT ? Math.min((now - lastT) / 1000, 0.1) : 0.03;
   if (lastT) fpsEMA = fpsEMA ? fpsEMA * 0.9 + (1 / dt) * 0.1 : 1 / dt;
   lastT = now;
-  const e = Math.min((now - morphT0) / morphDur, 1);
+  const e = Math.min(Math.max((now - morphT0) / morphDur, 0), 1);
   curMix = e < 0.5 ? 2 * e * e : 1 - Math.pow(-2 * e + 2, 2) / 2;
   stepSkyClouds(dt);
   draw(now);

@@ -221,6 +221,10 @@ The native `--selftest-demo` checks hiding and revealing icon layouts while paus
 The Node transition checks exercise interrupted reveals, hides and repeated moves using the actual
 field and texture-upload code. New targets start from the currently displayed blend. Pausing a
 partly completed transition freezes it; new icon layouts received while paused still update once.
+Meadow uses 450 ms interactive transitions: its cloud edges concealed much of the previous
+1800 ms animation. The smooth easing and initial 2600 ms opening remain. These are
+renderer durations after a message arrives, not mouse-to-screen latency; native icon polling
+still uses 0.1-second intervals during recent changes and 0.4 seconds when the desktop is stable.
 
 ## Known gaps
 
@@ -364,6 +368,9 @@ macOS 隐藏桌面图标时，Finder 可能仍返回原来的位置。宿主检�
 普通窗口遮挡只触发暂停；草地在暂停期间也会单次更新静态布局。自然飘动的云和角色仍然保留。
 图标更新打断过渡时，从当前显示的中间形状继续；暂停会冻结正在过渡的形状，恢复时继续。
 暂停期间收到新的图标布局仍会单次更新。`node tools/tests/test_terrain_transitions.mjs` 验证这些行为。
+草地的交互过渡缩短为 450 毫秒，避免原来 1800 毫秒过渡时云边迟迟不变；保留平滑缓动，
+首次打开仍为 2600 毫秒。这是收到消息后的渲染时长，不含原生图标轮询的等待（近期变化时 0.1 秒，
+稳定时 0.4 秒）。
 
 叶子菜单中的“同步新建桌面预览”默认关闭；开启后以当前主题的静帧更新 Mission Control 的“+”预览。
 仅在场景和布局变化稳定后捕获应用自己的网页，不持续截屏。关闭功能或正常退出时，通过本地恢复

@@ -38,8 +38,9 @@ function maxDifference(a, b) {
   return worst;
 }
 
-function harness(file) {
+function harness(file, { preview = false } = {}) {
   const source = fs.readFileSync(path.join(pages, file), 'utf8');
+  const timing = between(source, 'const MORPH_MS =', '\n');
   const field = between(source, 'let fieldMs = 0;', 'const VS =');
   const textureStart = source.indexOf('const f32 =');
   const current = source.indexOf('const curS =', textureStart);
@@ -47,6 +48,12 @@ function harness(file) {
   const transition = source.slice(textureStart, source.indexOf('\n', current));
   const animation = between(source, 'const T0 = performance.now();', 'function draw(now)');
   const hosted = between(source, 'function startHostedMode()', '\n</script>');
+  const cloudGeometry = file === 'meadow.html' ? [
+    between(source, 'function hash2(x, y, k = 0)', 'function vnoise'),
+    between(source, 'const rnd1 =', '\n'),
+    'let flowT = 0;',
+    between(source, 'const sstep =', '// 云里的圆在动'),
+  ].join('\n') : '';
   let clock = 10000, bound = null, nextTexture = 0;
   let messageListener, drawCalls = 0;
   const textures = new Map();
@@ -72,19 +79,22 @@ function harness(file) {
   };
   const context = vm.createContext({
     gl, performance: { now: () => clock }, console,
-    W: 720, H: 440, STEP: 5, Gw: 145, Gh: 89, MORPH_MS: 1800,
-    P: { sigma: file === 'flat.html' ? 85 : 72, warp: 0, adaptive: 1, cap30: 0 },
+    W: 720, H: 440, STEP: 5, Gw: 145, Gh: 89,
+    P: { sigma: file === 'flat.html' ? 85 : 72, warp: 0, edge: 10, adaptive: 1, cap30: 0 },
+    seed: 1337,
     icons: [], NZ: { wx: new Float32Array(145 * 89), wy: new Float32Array(145 * 89) },
-    PREVIEW: false, SHOW_DIAGNOSTICS: false, iconsSeen: false, massList: null,
-    document: { body: { classList: { add() {} } } },
+    PREVIEW: preview, SHOW_DIAGNOSTICS: false, iconsSeen: false, massList: null,
+    document: { body: { classList: { add() {} }, appendChild() {} }, createElement() { return {}; } },
+    parent: { postMessage(value) { assert.equal(JSON.parse(value).t, 'ready'); } },
+    addEventListener(type, listener) { assert.equal(type, 'message'); messageListener = listener; },
     window: { devicePixelRatio: 1, chrome: { webview: {
       addEventListener(type, listener) { assert.equal(type, 'message'); messageListener = listener; },
       postMessage(value) { assert.equal(value, 'ready'); },
     } } },
     requestAnimationFrame() {}, draw() { drawCalls++; },
-    stepKayaks() {}, stepBirds() {}, stepSkyClouds() {}, syncKayaks() {}, syncBirds() {},
+    stepKayaks() {}, stepBirds() {}, stepSkyClouds() {}, syncKayaks() {}, syncBirds() {}, drawGhosts() {},
   });
-  vm.runInContext([field, transition, animation, hosted].join('\n'), context, { filename: file });
+  vm.runInContext([timing, field, transition, cloudGeometry, animation, hosted].join('\n'), context, { filename: file });
   const run = code => vm.runInContext(code, context);
   run('allocField(); refresh();');
   const api = {
@@ -93,8 +103,8 @@ function harness(file) {
     present(progress) {
       const state = run('({morphT0,morphDur})');
       clock = state.morphT0 + state.morphDur * progress;
-      context.testProgress = progress;
-      run('curMix = testProgress < 0.5 ? 2 * testProgress ** 2 : 1 - (-2 * testProgress + 2) ** 2 / 2;');
+      // Use the renderer's actual curve and mode, including distinct intro/interactive easing.
+      run('lastT = 0; frame(performance.now());');
     },
     snapshot() {
       const state = run('({FA,FB,fromI,toI,curMix,ftex})');
@@ -116,7 +126,7 @@ function harness(file) {
     },
     liveTextureCount() { return textures.size; },
     startHosted() { run('startHostedMode();'); assert.equal(typeof messageListener, 'function'); },
-    message(value) { messageListener({ data: JSON.stringify(value) }); },
+    message(value) { messageListener({ data: JSON.stringify(value), source: context.parent }); },
     hostIcons(value) {
       api.message({ t: 'icons', vis: true, r: value.map(({ x, y, w, h }) => [x, y, x + w, y + h]) });
     },
@@ -124,6 +134,7 @@ function harness(file) {
     externalPause(value) { context.testPause = value; run('paused = testPause;'); },
     drawCalls() { return drawCalls; },
     isPaused() { return run('paused'); },
+    cloudCircles() { return run('buildMassCircles()'); },
   };
   return api;
 }
@@ -218,6 +229,17 @@ const scenarios = {
     h.message({ t: 'pause', v: false }); h.advance(0);
     assert.ok(maxDifference(resumed.cpu, h.snapshot().cpu) <= CPU_TOLERANCE, 'Duplicate resume must not shift the clock again');
   },
+  'interactive transition resumes using its own easing curve'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons(B); h.advance(100);
+    const before = h.snapshot();
+    assert.ok(before.mix > 0 && before.mix < 1, 'Fixture must pause an interactive transition');
+    h.message({ t: 'pause', v: true }); h.advance(5000);
+    h.message({ t: 'pause', v: false }); h.advance(0);
+    assert.ok(maxDifference(before.cpu, h.snapshot().cpu) <= CPU_TOLERANCE, 'Interactive resume must invert the active easing curve');
+    assert.ok(maxDifference(before.texture, h.snapshot().texture) <= TEXTURE_TOLERANCE);
+    const distance = maxDifference(before.cpu, h.target()); h.advance(50);
+    assert.ok(maxDifference(h.snapshot().cpu, h.target()) < distance, 'Interactive transition continues after resume');
+  },
   'host resume preserves a pause established by another shared script'(h) {
     h.startHosted(); h.hostIcons(A); h.advance(800);
     const before = h.snapshot();
@@ -267,8 +289,95 @@ const scenarios = {
   },
 };
 
+const previewScenarios = {
+  'preview host retargets an interactive move without a jump'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons(B); h.advance(100);
+    const before = h.snapshot(); h.hostIcons([]); continuity(h, before, 'preview move → hide'); finish(h);
+  },
+  'preview host ignores wallpaper pause messages'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons(B); h.advance(100);
+    const before = h.snapshot(); h.message({ t: 'pause', v: true });
+    assert.equal(h.isPaused(), false); h.advance(50);
+    assert.ok(h.snapshot().mix > before.mix, 'Preview animation continues after a host pause message');
+  },
+};
+
+const meadowResponseScenarios = {
+  'interactive cloud reveal becomes visible within 400ms and settles within 500ms'(h) {
+    h.startHosted(); h.hostIcons([]); h.advance(2600); h.hostIcons(A);
+    let visibleAt = null, settledAt = null;
+    for (let elapsed = 33; elapsed <= 660; elapsed += 33) {
+      h.advance(33);
+      const circles = h.cloudCircles();
+      for (let i = 2; i < circles.length; i += 4) {
+        if (circles[i] >= 2 && visibleAt === null) visibleAt = elapsed;
+      }
+      if (h.snapshot().mix === 1 && settledAt === null) settledAt = elapsed;
+    }
+    assert.ok(visibleAt !== null && visibleAt <= 400, `First cloud radius ≥2px appeared at ${visibleAt}ms`);
+    assert.ok(settledAt !== null && settledAt <= 500, `Cloud transition settled at ${settledAt}ms`);
+    console.log(`  Meadow reveal fixture (seed 1337, warp 0): visible ${visibleAt}ms; settled ${settledAt}ms`);
+  },
+  'moving an existing cloud changes its geometry on the first 33ms frame'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(2600);
+    const before = h.cloudCircles(); assert.ok(before.length > 0, 'Fixture needs visible icon clouds');
+    h.hostIcons(B); h.advance(33);
+    const after = h.cloudCircles(), radii = new Map();
+    for (let i = 0; i < after.length; i += 4) radii.set(`${after[i]},${after[i + 1]}`, after[i + 2]);
+    let delta = 0;
+    for (let i = 0; i < before.length; i += 4) {
+      delta = Math.max(delta, Math.abs(before[i + 2] - (radii.get(`${before[i]},${before[i + 1]}`) ?? 0)));
+    }
+    assert.ok(delta >= 1, `Existing cloud radius changed by only ${delta.toFixed(4)}px in its first frame`);
+    console.log(`  Meadow move fixture (seed 1337, warp 0): first-frame radius change ${delta.toFixed(2)}px`);
+  },
+  'hiding clouds remains visible on the first frame and clears within 200ms'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons([]); h.advance(33);
+    const firstFrame = h.cloudCircles();
+    assert.ok(firstFrame.some((value, i) => i % 4 === 2 && value >= 2), 'Clouds must shrink over frames instead of vanishing in one frame');
+    h.advance(167);
+    assert.equal(h.cloudCircles().length, 0, 'Hidden icon clouds should clear within 200ms');
+  },
+  'intro retains its gradual 2600ms quadratic timing'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(300);
+    assert.ok(Math.abs(h.snapshot().mix - 2 * (300 / 2600) ** 2) < 1e-9, 'Intro should be about 3% revealed at 300ms');
+    h.advance(300); assert.ok(h.snapshot().mix < 1, 'Intro must not finish on interactive timing');
+    h.advance(50);
+    assert.ok(Math.abs(h.snapshot().mix - 0.125) < 1e-9, 'Intro quarter-time should retain quadratic easing');
+    h.advance(650);
+    assert.ok(Math.abs(h.snapshot().mix - 0.5) < 1e-9, 'Intro midpoint should stay at half mix');
+    h.advance(1300); assert.equal(h.snapshot().mix, 1);
+  },
+  'interrupting the intro switches smoothly to interactive response'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(650);
+    const before = h.snapshot(); h.hostIcons(B); continuity(h, before, 'intro → interactive move');
+    h.advance(300);
+    assert.ok(h.snapshot().mix >= 0.7, 'New icon target should use the responsive interactive curve');
+    h.advance(300); assert.equal(h.snapshot().mix, 1, 'Retargeted intro should finish on interactive timing');
+  },
+  'first frame timestamp before commit does not extrapolate the field'(h) {
+    h.startHosted(); h.hostIcons(A); h.advance(2600); h.hostIcons(B);
+    const before = h.snapshot();
+    h.advance(-5);
+    assert.equal(h.snapshot().mix, 0, 'An earlier rAF timestamp must clamp to the start');
+    assert.ok(maxDifference(before.cpu, h.snapshot().cpu) <= CPU_TOLERANCE, 'Stale timestamp must preserve the visible field');
+    h.advance(5); assert.equal(h.snapshot().mix, 0);
+    h.advance(33); assert.ok(h.snapshot().mix > 0, 'Future timestamps must advance normally');
+  },
+};
+
 for (const [name, file] of [['Beach', 'flat.html'], ['Meadow', 'meadow.html']]) {
   for (const [scenario, test] of Object.entries(scenarios)) {
+    cases++;
+    try { test(harness(file)); console.log(`PASS ${name}: ${scenario}`); }
+    catch (error) { failures++; console.error(`FAIL ${name}: ${scenario}\n  ${error.message}`); }
+  }
+  for (const [scenario, test] of Object.entries(previewScenarios)) {
+    cases++;
+    try { test(harness(file, { preview: true })); console.log(`PASS ${name}: ${scenario}`); }
+    catch (error) { failures++; console.error(`FAIL ${name}: ${scenario}\n  ${error.message}`); }
+  }
+  if (file === 'meadow.html') for (const [scenario, test] of Object.entries(meadowResponseScenarios)) {
     cases++;
     try { test(harness(file)); console.log(`PASS ${name}: ${scenario}`); }
     catch (error) { failures++; console.error(`FAIL ${name}: ${scenario}\n  ${error.message}`); }
