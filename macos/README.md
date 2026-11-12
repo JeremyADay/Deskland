@@ -45,10 +45,21 @@ Simplified Chinese when the Mac's preferred language is Chinese, otherwise Engli
 
 Finder only tells another app where the desktop icons are through Accessibility. Choose Grant
 Accessibility… in the menu, or turn on **Deskland Preview** in System Settings > Privacy & Security
-> Accessibility. The scene forms around the icons within about 2 s, without a relaunch. Because the
-app is signed ad hoc, a rebuilt copy may need the switch turned off and on again. If the menu still
-shows **Grant Accessibility…**, remove the stale entry with **−**, add the rebuilt app with **+**,
-then enable it. Make sure you choose the same app copy that is running.
+> Accessibility. The scene forms around the icons within about 2 s, without a relaunch.
+
+If the switch is enabled but the menu still shows **Grant Accessibility…** after a rebuild, macOS
+may have retained permission for an older ad hoc signing hash. Reset that app's stale entry:
+
+1. Quit **Deskland Preview** from its leaf menu.
+2. Run `tccutil reset Accessibility app.deskland.preview.mac` in Terminal. This resets only this
+   app's Accessibility permission.
+3. Reopen the current app copy, for example `open ".capture/dist/Deskland Preview.app"` from the
+   repository root, then choose **Grant Accessibility…** from its menu.
+4. Reopen System Settings > Privacy & Security > Accessibility and enable **Deskland Preview**.
+   If it is absent, use **+** to add the same app copy you just opened.
+
+The reset removes the old permission; you must enable the current copy yourself. A later rebuild
+can change its signing hash again.
 
 Without the permission the host sends an empty icon list, so the page still shows its scene (open sea
 on the Beach, drifting clouds on the Meadow), and it checks every 2 s whether access has been granted.
@@ -251,9 +262,19 @@ tools/make-mac.sh <目录>      # 或生成 "<目录>/Deskland Preview.app"
 ### 辅助功能权限
 
 Finder 只通过辅助功能告诉其他程序桌面图标的位置。在菜单中选择“授予辅助功能权限…”，或在 系统设置 >
-隐私与安全性 > 辅助功能 中打开 **Deskland Preview**。约 2 秒内场景就会围绕图标生成，无需重启。由于
-是临时签名，重新构建后可能需要把开关关掉再打开。如果菜单仍显示“授予辅助功能权限…”，请用
-“−”移除旧条目，再用“+”添加重新构建的应用并启用，确保添加的是当前运行的副本。
+隐私与安全性 > 辅助功能 中打开 **Deskland Preview**。约 2 秒内场景就会围绕图标生成，无需重启。
+
+如果重新构建后开关已经启用，但菜单仍显示“授予辅助功能权限…”，macOS 可能仍将权限关联到旧的
+临时签名哈希。可按以下步骤重置本应用的旧权限记录：
+
+1. 从叶子菜单退出 **Deskland Preview**。
+2. 在终端运行 `tccutil reset Accessibility app.deskland.preview.mac`。此命令仅重置本应用的辅助功能权限。
+3. 重新打开当前应用副本，例如在仓库根目录运行 `open ".capture/dist/Deskland Preview.app"`，然后在应用
+   菜单中选择“授予辅助功能权限…”。
+4. 重新打开 系统设置 > 隐私与安全性 > 辅助功能，并启用 **Deskland Preview**。如果列表中没有该应用，
+   用“+”添加刚刚打开的同一副本。
+
+重置只会移除旧权限，仍需由你手动启用当前副本。再次构建可能再次改变签名哈希。
 
 未授权时宿主发送空的图标列表，页面仍显示场景（沙滩为开阔海面，草地为漂浮的云），并每 2 秒检查一次是否已授权。
 
