@@ -156,6 +156,7 @@ const MORPH_MS = 1800;
 const QS = new URLSearchParams(location.search);
 const WALL = QS.has('wallpaper');      // 壁纸模式：桌面宿主加载，消息来自宿主
 const PREVIEW = QS.has('preview');     // 预览模式：设置窗口里的缩略预览（iframe），消息来自父页面
+const SHOW_DIAGNOSTICS = !(WALL || PREVIEW); // 托管模式隐藏面板，不同步读回 GPU 或更新隐藏统计、时钟
 // 默认值要和 themes.json 里草地主题的 default 保持一致；grain、quality 不开放调节
 const P = {
   sigma: 72, warp: 40, edge: 10, cover: 0.3, flow: 1, grain: 1, quality: 2,   // quality 2：按屏幕的实际像素画（150% 缩放时不再放大发糊）
@@ -909,10 +910,10 @@ function frame(now) {
   curMix = e < 0.5 ? 2 * e * e : 1 - Math.pow(-2 * e + 2, 2) / 2;
   stepSkyClouds(dt);
   draw(now);
-  if (++frameN % 10 === 0) updateStats();
+  if (++frameN % 10 === 0 && SHOW_DIAGNOSTICS) updateStats();
 }
 function draw(now) {
-  const measure = frameN % 20 === 0, t0 = performance.now();
+  const measure = SHOW_DIAGNOSTICS && frameN % 20 === 0, t0 = measure ? performance.now() : 0;
   // 隐藏男孩时只保留路线状态，小猫仍能独立显示并避开男孩再次出现的路线。
   const boy=typeof prepareMeadowBoy==='function'?prepareMeadowBoy(now,P.showBoy===1):null;
   const actor=P.showBoy===1?boy:null;
@@ -1057,7 +1058,7 @@ function tickClock() {
   const d = new Date(), z = n => String(n).padStart(2, '0');
   document.getElementById('clock').innerHTML = `${z(d.getHours())}:${z(d.getMinutes())}<br>${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 }
-setInterval(tickClock, 15000); tickClock();
+if (SHOW_DIAGNOSTICS) { setInterval(tickClock, 15000); tickClock(); }
 
 /* ---------- 启动 ---------- */
 window.__dbg = {
