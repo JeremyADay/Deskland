@@ -106,8 +106,9 @@ final class ScenePage: NSObject, WKNavigationDelegate {
   /// Every other message the page posts (for example the share snapshot), as text.
   var onMessage: (String) -> Void = { _ in }
   var onError: (String) -> Void = { _ in }
-  /// Every message delivered to the page, in order, for the self-test.
-  private(set) var sent: [String] = []
+  /// Number of messages submitted to the page, for diagnostics and the self-test. Keeping only
+  /// a count avoids retaining historical icon positions for the lifetime of the wallpaper.
+  private(set) var sentCount = 0
   private let shim = ShimHandler()
 
   init(frame: NSRect, theme: Theme) {
@@ -146,7 +147,7 @@ final class ScenePage: NSObject, WKNavigationDelegate {
   /// Sends one message (JSON text) to the page's listeners, once the page is ready.
   func send(_ json: String) {
     guard ready else { return }
-    sent.append(json)
+    sentCount += 1
     view.evaluateJavaScript(Shim.deliver(json)) { [weak self] _, error in
       if let error { self?.onError("delivering a message: \(error.localizedDescription)") }
     }

@@ -16,6 +16,7 @@ enum Strings {
   /// Mac-only words: [English, Chinese].
   private static let own: [String: (en: String, zh: String)] = [
     "grant": ("Grant Accessibility…", "授予辅助功能权限…"),
+    "desktopPreview": ("Match new desktop preview", "同步新建桌面预览"),
     "about": ("About Deskland Preview", "关于 Deskland Preview"),
     "aboutText": (
       "Deskland Preview for macOS. Mac host by Jeremy Day (github.com/JeremyADay). GPL-3.0.",

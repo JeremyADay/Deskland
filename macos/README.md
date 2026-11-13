@@ -45,8 +45,21 @@ Simplified Chinese when the Mac's preferred language is Chinese, otherwise Engli
 
 Finder only tells another app where the desktop icons are through Accessibility. Choose Grant
 Accessibility… in the menu, or turn on **Deskland Preview** in System Settings > Privacy & Security
-> Accessibility. The scene forms around the icons within about 2 s, without a relaunch. Because the
-app is signed ad hoc, a rebuilt copy may need the switch turned off and on again.
+> Accessibility. The scene forms around the icons within about 2 s, without a relaunch.
+
+If the switch is enabled but the menu still shows **Grant Accessibility…** after a rebuild, macOS
+may have retained permission for an older ad hoc signing hash. Reset that app's stale entry:
+
+1. Quit **Deskland Preview** from its leaf menu.
+2. Run `tccutil reset Accessibility app.deskland.preview.mac` in Terminal. This resets only this
+   app's Accessibility permission.
+3. Reopen the current app copy, for example `open ".capture/dist/Deskland Preview.app"` from the
+   repository root, then choose **Grant Accessibility…** from its menu.
+4. Reopen System Settings > Privacy & Security > Accessibility and enable **Deskland Preview**.
+   If it is absent, use **+** to add the same app copy you just opened.
+
+The reset removes the old permission; you must enable the current copy yourself. A later rebuild
+can change its signing hash again.
 
 Without the permission the host sends an empty icon list, so the page still shows its scene (open sea
 on the Beach, drifting clouds on the Meadow), and it checks every 2 s whether access has been granted.
@@ -56,8 +69,9 @@ on the Beach, drifting clouds on the Meadow), and it checks every 2 s whether ac
 - Read: the **position and size** of each desktop icon (Finder's desktop, main screen only), and the
   position and size of on-screen windows (to decide when to pause).
 - Never read: icon names, file names, paths, window titles or contents, or any other attribute. No
-  action is ever performed on an icon. No network, no screenshots, nothing written except the
-  chosen theme, the instance lock and short status lines in the system log (`deskland: …`).
+  action is ever performed on an icon. No network or desktop screenshots. The host writes preferences, the instance lock and short status
+  lines in the system log (`deskland: …`). Optional desktop-preview matching saves only the
+  rendered theme and a local wallpaper-restoration journal, as described below.
 
 ## How it talks to the pages
 
@@ -119,6 +133,107 @@ The scene test uses a 1728 × 1117 point web view at scale 2. It sends the setti
 `pause:false` once the page says `ready`, waits about 6.5 s, logs the page state (canvas size,
 WebGL2, `cap30`, measured fps) and writes a snapshot PNG. A watchdog exits 1 if anything stalls.
 
+## Local demo and profiling
+
+Double-click `tools/demo-mac.command` in Finder, or run it from the repository. It builds the app
+if needed and opens a normal window with sample icons; it does not require Accessibility.
+The Demo menu switches themes (⌘1/⌘2), pauses (⌘P), moves sample icons (⌘M), and reloads (⌘R).
+Close the window or use ⌘Q to quit. Launch the app without arguments for the actual wallpaper.
+
+For shared-theme development, quit the wallpaper and run `tools/wallpaper-mac.command` (or
+double-click it in Finder). It copies this checkout's `prototype/` assets into the app's own support
+folder and points the existing host there through `DESKLAND_PAGES`, building only if the app is
+missing. This lets the host read the theme assets without access to the source Documents folder.
+Quit and rerun the launcher after editing themes; opening the app directly uses its bundled pages.
+Theme-only edits do not rebuild or change the host's signature.
+Swift host changes still require a build and may require the Accessibility reset described above.
+
+```sh
+tools/make-mac.sh
+A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
+"$A" --demo beach
+mkdir -p .capture/profiles
+"$A" --profile meadow .capture/profiles/meadow.json
+"$A" --profile beach .capture/profiles/beach.json --no-icons
+python3 tools/profile-mac-resources.py .capture/profiles/resources.json -- \
+  "$A" --profile meadow .capture/profiles/frames.json
+tools/test-mac-policy.sh
+node tools/tests/test_terrain_transitions.mjs
+"$A" --selftest-demo .capture/demo-tests
+```
+
+The profile uses the main display's current logical dimensions and backing scale, a fixed seed,
+and nine sample icon rectangles (or none). Actors and some noise remain randomized, so repeat
+comparisons before attributing small CPU differences to a patch. After warmup it measures active, paused, and resumed
+phases. JSON records rendered FPS, rAF callbacks, synchronous readbacks, frame callback duration
+and frame interval distributions. Callback duration includes JavaScript and synchronous waits;
+it does not measure asynchronous GPU execution or energy use. The profile is offscreen and does
+not exercise Finder polling or desktop window coverage.
+
+The optional Python sampler uses macOS process counters for host CPU time, wakeups and memory,
+plus newly spawned WebKit processes. Keep other WebKit launches quiet during a run: attribution
+uses creation time because XPC processes belong to launchd. CPU 100% means one full core; summed
+physical footprints can count shared allocations twice. Reports remain under ignored `.capture/`.
+Full Xcode/Instruments is optional for deeper GPU and energy profiling.
+
+The demo integration test opens a temporary visible window, checks both themes, movement,
+resize, pause/resume, reload and the existing share-snapshot bridge, saves images/JSON, then exits.
+It does not move real Finder icons or change system permissions. Actual sleep/wake, Spaces,
+Stage Manager, multiple displays and permission revocation still need interactive testing.
+
+The host keeps only a message counter, checks icon permission and visibility every two seconds when paused,
+and reads Finder positions once when icons reappear rather than continuously while paused.
+It stops icon/window polling during sleep, lock, inactive-session or screen-saver suspension.
+Independent suspension reasons prevent a display-wake event from clearing an active lock.
+The theme pages skip hidden diagnostic GPU readbacks and DOM timers in wallpaper/preview mode;
+explicit `__dbg.bench()` and ordinary browser diagnostics remain available.
+
+## Hidden desktop icons and the new-desktop preview
+
+When macOS hides desktop items after clicking the wallpaper, Finder may still expose their AX
+rectangles. The host also checks the ordering of Finder and WindowManager desktop-icon windows,
+using geometry and visibility metadata only. A hiding layer clears the icon rectangles sent to the
+scene; revealing the icons restores them. Normal application windows only pause animation. Meadow
+also redraws its static layout once when an icon update arrives while paused, matching Beach.
+Natural drifting clouds and characters remain; the dense shapes tied to hidden icons disappear.
+
+The leaf menu's **Match new desktop preview** option makes Mission Control's “+” thumbnail match
+the selected scene. It is off by default. When enabled, the host snapshots only its WKWebView after
+scene/layout changes have settled and uses the public desktop-picture API to update macOS. There
+is no periodic screenshot loop. The thumbnail is a still frame; the wallpaper window stays animated.
+
+The public API cannot preserve all original dynamic-wallpaper and Space settings by itself. Before
+changing anything, the host saves a local recovery journal. On disable or normal quit it merges back
+only settings still owned by its snapshots, preserving a wallpaper the user selected meanwhile.
+New Spaces that inherited an app snapshot return to their underlying wallpaper settings too.
+Exact restoration uses the versioned macOS wallpaper store format; unsupported or malformed state
+stops syncing. Forced termination leaves recovery for the next launch. Snapshot files still referenced
+by macOS are retained. This is an experimental integration, not a public all-Spaces wallpaper API.
+
+Developer checks (no preference changes):
+
+```sh
+tools/test-mac-icon-visibility.sh
+tools/test-mac-interaction.sh
+tools/test-wallpaper-restore.sh
+```
+
+The native `--selftest-demo` checks hiding and revealing icon layouts while paused in both themes.
+The Node transition checks exercise interrupted reveals, hides and repeated moves using the actual
+field and texture-upload code. New targets start from the currently displayed blend. Pausing a
+partly completed transition freezes it; new icon layouts received while paused still update once.
+Both themes retain their original 1800 ms interactive transitions and 2600 ms opening. A passive
+global left-mouse-up listener requests an immediate coverage and icon refresh, then rechecks at
+50, 150 and 300 ms because Finder may publish a drop or visibility change after the release.
+Each release replaces pending follow-ups; an in-flight Finder read completes before one queued
+refresh, and unchanged layouts are not resent. Suspension and quit remove the listener and cancel
+the burst. The listener does not consume clicks or retain event contents. Unrelated clicks can
+also trigger this bounded work. Fallback icon polling remains at 0.1 seconds during recent changes
+and 0.4 seconds when stable; paused visibility checks remain at two seconds.
+For onset diagnostics, launch the host with `DESKLAND_TRACE_INTERACTIONS=1`. It logs each observed
+mouse-up and elapsed time to the next changed icon layout, without event coordinates or file
+details. This measures host notification timing, not when GPU pixels reach the display.
+
 ## Known gaps
 
 - Main screen only, as on Windows: other displays keep their normal wallpaper.
@@ -171,16 +286,27 @@ tools/make-mac.sh <目录>      # 或生成 "<目录>/Deskland Preview.app"
 ### 辅助功能权限
 
 Finder 只通过辅助功能告诉其他程序桌面图标的位置。在菜单中选择“授予辅助功能权限…”，或在 系统设置 >
-隐私与安全性 > 辅助功能 中打开 **Deskland Preview**。约 2 秒内场景就会围绕图标生成，无需重启。由于
-是临时签名，重新构建后可能需要把开关关掉再打开。
+隐私与安全性 > 辅助功能 中打开 **Deskland Preview**。约 2 秒内场景就会围绕图标生成，无需重启。
+
+如果重新构建后开关已经启用，但菜单仍显示“授予辅助功能权限…”，macOS 可能仍将权限关联到旧的
+临时签名哈希。可按以下步骤重置本应用的旧权限记录：
+
+1. 从叶子菜单退出 **Deskland Preview**。
+2. 在终端运行 `tccutil reset Accessibility app.deskland.preview.mac`。此命令仅重置本应用的辅助功能权限。
+3. 重新打开当前应用副本，例如在仓库根目录运行 `open ".capture/dist/Deskland Preview.app"`，然后在应用
+   菜单中选择“授予辅助功能权限…”。
+4. 重新打开 系统设置 > 隐私与安全性 > 辅助功能，并启用 **Deskland Preview**。如果列表中没有该应用，
+   用“+”添加刚刚打开的同一副本。
+
+重置只会移除旧权限，仍需由你手动启用当前副本。再次构建可能再次改变签名哈希。
 
 未授权时宿主发送空的图标列表，页面仍显示场景（沙滩为开阔海面，草地为漂浮的云），并每 2 秒检查一次是否已授权。
 
 #### 读取什么，绝不读取什么
 
 - 读取：每个桌面图标的**位置和大小**（Finder 桌面，仅主屏幕），以及屏幕上窗口的位置和大小（用于判断何时暂停）。
-- 绝不读取：图标名称、文件名、路径、窗口标题或内容等任何其他属性。不会对图标执行任何操作。不联网、
-  不截屏，除所选主题、单实例锁和系统日志中的简短状态行（`deskland: …`）外不写入任何内容。
+- 绝不读取：图标名称、文件名、路径、窗口标题或内容。不会对图标执行任何操作，不联网，也不截取桌面或其他应用。
+  除设置、单实例锁和简短日志外，可选的桌面预览同步会保存主题渲染图及本地恢复记录。
 
 ### 与页面的通信
 
@@ -218,3 +344,47 @@ A=".capture/dist/Deskland Preview.app/Contents/MacOS/Deskland"
 - 暂无登录时自动启动选项。
 - 未正式签名（ad hoc）：下载的副本首次打开时 Gatekeeper 会提示，重新构建后可能需要重置辅助功能开关。
 - 暂停规则逐个窗口判断，多个窗口合起来覆盖屏幕时不会暂停（与 Windows 版相同）。
+
+### 本地演示与性能分析
+
+双击 `tools/demo-mac.command` 可打开普通演示窗口，无需辅助功能权限。菜单支持切换主题（⌘1/⌘2）、
+暂停（⌘P）、移动示例图标（⌘M）、重载（⌘R）和退出（⌘Q）。不带参数启动应用仍是桌面壁纸模式。
+
+开发共享主题时，先退出壁纸，再运行或双击 `tools/wallpaper-mac.command`。它将仓库的 `prototype/`
+资源复制到应用自己的支持目录，再通过 `DESKLAND_PAGES` 让现有宿主读取副本，仅在应用不存在时
+构建。宿主无需读取“文稿”中的源目录。编辑主题后退出并重新运行脚本；直接打开应用仍读取包内
+页面。只改主题无需重建或更改签名。
+修改 Swift 宿主仍需构建，且可能需要按上文重置辅助功能权限。
+
+`--profile <meadow|beach> <out.json> [--no-icons]` 按当前主屏幕逻辑尺寸与缩放比例，在屏幕外测量
+运行、暂停及恢复后的帧数、rAF 回调、同步 GPU 读回和回调耗时；这不是 GPU 执行时间或能耗测量。
+`tools/profile-mac-resources.py` 可同时采样宿主及新建 WebKit 进程的 CPU、唤醒和内存；运行期间
+避免启动其他 WebKit 应用，累计内存可能重复计算共享分配。结果请保存在忽略的 `.capture/` 目录。
+
+`tools/test-mac-policy.sh` 测试暂停原因叠加及轮询策略。`--selftest-demo <目录>` 会短暂打开窗口，
+验证两主题的移动、缩放、暂停恢复、重载及分享图片消息并保存结果，然后退出。它不操作真实图标或
+修改系统权限；实际休眠唤醒、空间、台前调度、多显示器及权限撤销仍需人工验证。
+
+宿主仅保留消息计数，暂停时每两秒检查权限与可见性，图标重新显示时只读取一次 Finder 位置。
+休眠、锁屏、会话停用或屏保期间停止轮询。
+各暂停原因独立维护。壁纸与预览模式跳过隐藏诊断的 GPU 读回及 DOM 计时器，显式性能测试仍可使用。
+
+### 隐藏桌面图标与新增桌面预览
+
+macOS 隐藏桌面图标时，Finder 可能仍返回原来的位置。宿主检查 Finder 与 WindowManager 在
+桌面图标层的前后关系，只读几何与可见性元数据。隐藏时清空主题中的图标布局，显示时恢复。
+普通窗口遮挡只触发暂停；草地在暂停期间也会单次更新静态布局。自然飘动的云和角色仍然保留。
+图标更新打断过渡时，从当前显示的中间形状继续；暂停会冻结正在过渡的形状，恢复时继续。
+暂停期间收到新的图标布局仍会单次更新。`node tools/tests/test_terrain_transitions.mjs` 验证这些行为。
+两个主题保留原来的 1800 毫秒交互过渡与 2600 毫秒开场。被动监听全局鼠标左键释放后立即检查
+遮挡与图标，并在 50、150、300 毫秒补查 Finder 稍后发布的拖放或可见性变化。新的释放替换
+待执行的补查；正在进行的 Finder 读取完成后立即处理一次合并请求，不重发未变化的布局。
+休眠、锁屏等挂起状态以及退出时移除监听并取消补查。监听不拦截点击、不保存事件内容；其他
+应用中的点击也可能触发这组有上限的检查。保留原来的 0.1/0.4 秒轮询和暂停时每两秒的可见性检查。
+`tools/test-mac-interaction.sh` 验证补查合并、取消和生命周期。
+
+叶子菜单中的“同步新建桌面预览”默认关闭；开启后以当前主题的静帧更新 Mission Control 的“+”预览。
+仅在场景和布局变化稳定后捕获应用自己的网页，不持续截屏。关闭功能或正常退出时，通过本地恢复
+记录还原仍归应用所有的壁纸设置，保留用户随后选择的新壁纸。继承了应用静帧的新空间也会恢复
+原有壁纸继承关系。精确恢复依赖 macOS 壁纸配置格式；
+状态不支持或损坏时停止同步，强制退出后在下次启动恢复。仍被系统引用的图片会保留。

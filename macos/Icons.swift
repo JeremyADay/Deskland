@@ -6,8 +6,8 @@
 //
 // Adapted from Desk Critters (wallpaper/Icons.swift). macOS tells an app where Finder's desktop
 // icons are only through Accessibility, which the person grants in System Settings > Privacy &
-// Security > Accessibility. Only the position and the size of each icon are read: never a title,
-// file name, URL or any other attribute, and no action is ever performed on an icon.
+// Security > Accessibility. Only icon geometry and structural/visibility metadata are read:
+// never a title, file name or URL, and no action is ever performed on an icon.
 
 import ApplicationServices
 import Cocoa
@@ -32,77 +32,126 @@ final class DesktopIcons {
   /// Whether Accessibility is granted, when that changes (for the menu).
   var onTrust: (Bool) -> Void = { _ in }
 
-  /// As the Windows host: a look every 0.4 s, and every 0.1 s for 2 s after a change, so a
-  /// dragged icon is followed smoothly.
-  private static let slow = 0.4, fast = 0.1, quickFor = 2.0
-  /// Without the permission, how often to see whether it has been granted since.
-  private static let recheck = 2.0
   /// A busy Finder gets this long to answer one question.
   private static let patience: Float = 0.25
   private static let most = 600
 
   private var timer: Timer?
+  private var mode = IconPollingMode.stopped
+  /// In-flight AX requests cannot be cancelled. A result from an earlier mode must not update
+  /// the scene after pausing, stopping, or resuming with a different desktop arrangement.
+  private var generation = 0
   private var reading = false
-  private var lastLook = -Double.infinity
-  private var lastTrustCheck = -Double.infinity
+  private var refreshPending = false
   private var lastChange = -Double.infinity
+  /// Last visibility state successfully applied. While paused, an unchanged visible desktop
+  /// needs no AX reads; a reveal (or a pending refresh after an AX failure) needs one.
+  private var lastRefreshedVisibility: Bool?
   private(set) var trusted = false
   private var last: [[Int]]?
   private let queue = DispatchQueue(label: "deskland.icons", qos: .utility)
 
-  func start() {
-    guard timer == nil else { return }
-    trusted = Accessibility.trusted
-    onTrust(trusted)
-    if !trusted { report([]) }
-    let timer = Timer(timeInterval: Self.fast, repeats: true) { [weak self] _ in self?.tick() }
-    timer.tolerance = 0.03
-    RunLoop.main.add(timer, forMode: .common)
-    self.timer = timer
-  }
-
-  func stop() {
+  func setMode(_ next: IconPollingMode) {
+    guard next != mode else { return }
+    mode = next
+    generation += 1
+    refreshPending = false
     timer?.invalidate()
     timer = nil
+    lastChange = -Double.infinity
+    lastRefreshedVisibility = nil
+    // A paused transition checks visibility once, then only refreshes AX after a reveal.
+    tick()
   }
+
+  func stop() { setMode(.stopped) }
 
   /// Forgets the last list, so the next look is sent even if unchanged (after a page reload).
   func resend() {
     last = nil
-    lastLook = -Double.infinity
-    if !trusted { report([]) }
+    lastRefreshedVisibility = nil
+    generation += 1
+    tick()
+  }
+
+  /// A release can finish a drop or change desktop visibility before the next idle poll.
+  /// Keep `last`: an unchanged layout must not restart the renderer's animation. If Finder is
+  /// already answering, coalesce requests into one fresh read immediately after it finishes.
+  func refreshAfterInteraction() {
+    guard mode != .stopped, checkTrust() else { return }
+    if reading { refreshPending = true; return }
+    tick()
+  }
+
+  @discardableResult private func checkTrust() -> Bool {
+    let current = Accessibility.trusted
+    if current != trusted {
+      trusted = current
+      lastRefreshedVisibility = nil
+      onTrust(current)
+    }
+    if !current { report([]) }
+    return current
+  }
+
+  private func schedule() {
+    timer?.invalidate()
+    timer = nil
+    let elapsed = ProcessInfo.processInfo.systemUptime - lastChange
+    guard let interval = mode.interval(trusted: trusted, sinceChange: elapsed) else { return }
+    let timer = Timer(timeInterval: interval, repeats: false) { [weak self] _ in self?.tick() }
+    timer.tolerance = min(interval * 0.2, 0.1)
+    RunLoop.main.add(timer, forMode: .common)
+    self.timer = timer
   }
 
   private func tick() {
-    let now = ProcessInfo.processInfo.systemUptime
-    if !trusted {
-      guard now - lastTrustCheck >= Self.recheck else { return }
-      lastTrustCheck = now
-      guard Accessibility.trusted else { return }
-      trusted = true
-      onTrust(true)
-    }
-    let interval = now - lastChange < Self.quickFor ? Self.fast : Self.slow
-    guard !reading, now - lastLook >= interval - 0.02 else { return }
-    lastLook = now
-    // The permission taken away: say so, show the plain scene and go back to checking.
-    guard Accessibility.trusted else {
-      trusted = false
-      lastTrustCheck = now
-      onTrust(false)
-      report([])
+    timer?.invalidate()
+    timer = nil
+    guard mode != .stopped else { return }
+    guard checkTrust() else {
+      schedule()
       return
     }
+    // The outstanding request's callback will restart polling if its generation became stale.
+    guard !reading else { return }
     guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder").first
-    else { return }
+    else { schedule(); return }
     let pid = finder.processIdentifier
+    let windowManagerPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.WindowManager")
+      .first?.processIdentifier
+    guard let screen = NSScreen.screens.first else { schedule(); return }
+    let screenArea = CGRect(origin: .zero, size: screen.frame.size)
+    let requestGeneration = generation
+    let paused = mode == .permissionOnly
+    let previousVisibility = lastRefreshedVisibility
+    refreshPending = false
     reading = true
     queue.async { [weak self] in
-      let rects = Self.read(pid)
+      let visible = Self.desktopVisible(finder: pid, windowManager: windowManagerPID, screen: screenArea)
+      let action = DesktopIconVisibility.readAction(paused: paused, visible: visible,
+        lastRefreshedVisibility: previousVisibility)
+      let rects: [CGRect]?
+      switch action {
+      case .clear: rects = []
+      case .read: rects = Self.read(pid)
+      case .keep: rects = nil
+      }
       DispatchQueue.main.async {
         guard let self else { return }
         self.reading = false
-        if let rects { self.report(Self.physical(rects)) }
+        guard requestGeneration == self.generation else {
+          if self.mode != .stopped { self.tick() }
+          return
+        }
+        guard self.mode != .stopped else { return }
+        // Permission can be revoked while Finder is answering.
+        if self.checkTrust(), let rects {
+          self.report(Self.physical(rects))
+          if let visible { self.lastRefreshedVisibility = visible }
+        }
+        if self.refreshPending { self.tick() }
+        else { self.schedule() }
       }
     }
   }
@@ -127,6 +176,26 @@ final class DesktopIcons {
   }
 
   // MARK: - Reading Finder, off the main thread
+
+  /// Finder's AX tree survives macOS's click-to-reveal/hide transition. Read window metadata,
+  /// not pixels or titles, to notice the WindowManager layer that actually hides those icons.
+  private static func desktopVisible(finder: pid_t, windowManager: pid_t?, screen: CGRect) -> Bool? {
+    guard let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]]
+    else { return nil }
+    let windows = list.compactMap { info -> DesktopIconVisibility.Window? in
+      guard let pid = info[kCGWindowOwnerPID as String] as? Int32,
+        pid == finder || (windowManager != nil && pid == windowManager),
+        let layer = info[kCGWindowLayer as String] as? Int,
+        let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+        let rect = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+        let alpha = info[kCGWindowAlpha as String] as? Double
+      else { return nil }
+      return DesktopIconVisibility.Window(owner: pid == finder ? .finder : .windowManager,
+        bounds: rect, layer: layer, alpha: alpha, onScreen: true)
+    }
+    return DesktopIconVisibility.visible(windows: windows, screen: screen,
+      iconLayer: Int(CGWindowLevelForKey(.desktopIconWindow)))
+  }
 
   /// The rects of the icons on Finder's desktop (global, top left of the main screen, points), or
   /// nil when they cannot be read just now.

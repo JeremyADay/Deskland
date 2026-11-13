@@ -60,13 +60,25 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   private var themeItems: [Theme: NSMenuItem] = [:]
   private let pauseItem = NSMenuItem(title: Strings.pause, action: #selector(togglePause), keyEquivalent: "")
   private let grantItem = NSMenuItem(title: Strings.own("grant"), action: #selector(grantAccess), keyEquivalent: "")
+  private let previewItem = NSMenuItem(title: Strings.own("desktopPreview"), action: #selector(toggleDesktopPreview), keyEquivalent: "")
+  private let desktopPreview = DesktopPreview()
+  private var terminationPending = false
   private var watchTimer: Timer?
+  private var mouseUpMonitor: Any?
+  private let traceInteractions = ProcessInfo.processInfo.environment["DESKLAND_TRACE_INTERACTIONS"] == "1"
+  private var interactionStartedAt: TimeInterval?
+  private lazy var interactionRefresh = InteractionRefresh { [weak self] in
+    guard let self, !self.terminationPending, self.policy.suspensions.isEmpty else { return }
+    // Uncovering must resume the scene before its new icon layout arrives.
+    self.watchWindows()
+    self.icons.refreshAfterInteraction()
+  }
   private var lastIcons: [[Int]] = []
+  private var loggedIconCount: Int?
+  private var loggedTrust: Bool?
   /// The pause the page was last told, or nil when it has not been told yet.
   private var sentPause: Bool?
-  private var manualPause = false
-  private var awake = true
-  private var covered = false
+  private var policy = HostPolicy()
   private var mainFrame = NSRect.zero
 
   private var theme: Theme {
@@ -75,40 +87,73 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   func applicationDidFinishLaunching(_ note: Notification) {
+    desktopPreview.start()
     addMenu()
     buildWindow()
     icons.onChange = { [weak self] rects in self?.iconsChanged(rects) }
-    icons.onTrust = { [weak self] trusted in self?.grantItem.isHidden = trusted }
-    icons.start()
+    icons.onTrust = { [weak self] trusted in
+      guard let self else { return }
+      self.grantItem.isHidden = trusted
+      if self.loggedTrust != trusted {
+        self.loggedTrust = trusted
+        Log.line(trusted ? "Accessibility granted" : "Accessibility required for desktop icon positions")
+      }
+    }
+    let trusted = Accessibility.trusted
+    loggedTrust = trusted
+    Log.line(trusted ? "Accessibility granted" : "Accessibility required for desktop icon positions")
 
     NotificationCenter.default.addObserver(
       self, selector: #selector(screensChanged), name: NSApplication.didChangeScreenParametersNotification, object: nil)
     // Nothing to draw while the display sleeps, the session is switched away, the screen is
     // locked or the screen saver runs.
     let workspace = NSWorkspace.shared.notificationCenter
-    for (name, value) in [
-      (NSWorkspace.screensDidSleepNotification, false), (NSWorkspace.screensDidWakeNotification, true),
-      (NSWorkspace.sessionDidResignActiveNotification, false), (NSWorkspace.sessionDidBecomeActiveNotification, true),
+    workspace.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+      guard let self else { return }
+      self.icons.resend()
+      self.scheduleDesktopPreview(spaceChanged: true)
+    }
+    for (name, reason, suspended) in [
+      (NSWorkspace.screensDidSleepNotification, HostPolicy.Suspension.displaySleep, true),
+      (NSWorkspace.screensDidWakeNotification, .displaySleep, false),
+      (NSWorkspace.sessionDidResignActiveNotification, .inactiveSession, true),
+      (NSWorkspace.sessionDidBecomeActiveNotification, .inactiveSession, false),
     ] {
-      workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in self?.setAwake(value) }
+      workspace.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+        self?.setSuspended(reason, suspended)
+      }
     }
     let distributed = DistributedNotificationCenter.default()
-    for (name, value) in [
-      ("com.apple.screenIsLocked", false), ("com.apple.screenIsUnlocked", true),
-      ("com.apple.screensaver.didstart", false), ("com.apple.screensaver.didstop", true),
+    for (name, reason, suspended) in [
+      ("com.apple.screenIsLocked", HostPolicy.Suspension.locked, true),
+      ("com.apple.screenIsUnlocked", .locked, false),
+      ("com.apple.screensaver.didstart", .screenSaver, true),
+      ("com.apple.screensaver.didstop", .screenSaver, false),
     ] {
-      distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in self?.setAwake(value) }
+      distributed.addObserver(forName: .init(name), object: nil, queue: .main) { [weak self] _ in
+        self?.setSuspended(reason, suspended)
+      }
     }
-    // Windows covering the screen: a look twice a second, as the Windows host does.
-    let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.watchWindows() }
-    timer.tolerance = 0.1
-    RunLoop.main.add(timer, forMode: .common)
-    watchTimer = timer
+    updatePause()
   }
 
-  /// Quit (from the menu, a log out or a plain `kill`) takes the wallpaper window away first, so the
-  /// normal desktop picture is back at once. macOS would remove it with the process anyway.
+  /// Quit waits for any native preview restoration before macOS removes the wallpaper window.
+  func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+    guard !terminationPending else { return .terminateLater }
+    terminationPending = true
+    stopInteractionMonitoring()
+    watchTimer?.invalidate()
+    watchTimer = nil
+    icons.stop()
+    desktopPreview.stop {
+      // Always reply on a later runloop turn, after applicationShouldTerminate returned.
+      RunLoop.main.perform(inModes: [.common]) { sender.reply(toApplicationShouldTerminate: true) }
+    }
+    return .terminateLater
+  }
+
   func applicationWillTerminate(_ note: Notification) {
+    stopInteractionMonitoring()
     watchTimer?.invalidate()
     icons.stop()
     page?.close()
@@ -151,6 +196,7 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
       self.sendIcons(to: page)
       self.sentPause = nil
       self.updatePause()
+      self.scheduleDesktopPreview()
       Log.line("\(page.theme.rawValue) ready")
     }
     page.onError = { text in Log.line("page: \(text)") }
@@ -164,29 +210,91 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func iconsChanged(_ rects: [[Int]]) {
+    if loggedIconCount != rects.count {
+      loggedIconCount = rects.count
+      Log.line("visible desktop icon count: \(rects.count)")
+    }
     lastIcons = rects
     if let page { sendIcons(to: page) }
+    if let started = interactionStartedAt {
+      Log.line(String(format: "mouse-up to changed icon layout: %.1f ms",
+        (ProcessInfo.processInfo.systemUptime - started) * 1000))
+      interactionStartedAt = nil
+    }
+    scheduleDesktopPreview()
+  }
+
+  private func scheduleDesktopPreview(spaceChanged: Bool = false) {
+    guard !terminationPending else { return }
+    desktopPreview.schedule(page: page, screen: NSScreen.screens.first, spaceChanged: spaceChanged)
   }
 
   @objc private func screensChanged() {
-    guard let screen = NSScreen.screens.first, screen.frame != mainFrame else { return }
+    guard let screen = NSScreen.screens.first else { return }
     mainFrame = screen.frame
     window?.setFrame(screen.frame, display: true)
     // The page measures itself on resize; the icons are read again for the new arrangement.
     icons.resend()
+    scheduleDesktopPreview()
   }
 
   // MARK: - Pause
 
-  private func setAwake(_ value: Bool) {
-    awake = value
+  private func setSuspended(_ reason: HostPolicy.Suspension, _ suspended: Bool) {
+    policy.setSuspended(reason, suspended)
+    desktopPreview.setSuspended(!policy.suspensions.isEmpty)
     updatePause()
+  }
+
+  private func updatePolling() {
+    updateInteractionMonitoring()
+    if policy.pollWindows {
+      if watchTimer == nil {
+        // The windows may have changed while manually paused, asleep or locked. Sample before
+        // deciding whether to resume the page or restart Finder reads.
+        policy.covered = Self.screenCovered(mainFrame.size)
+        let timer = Timer(timeInterval: 0.5, repeats: true) { [weak self] _ in self?.watchWindows() }
+        timer.tolerance = 0.1
+        RunLoop.main.add(timer, forMode: .common)
+        watchTimer = timer
+      }
+    } else {
+      watchTimer?.invalidate()
+      watchTimer = nil
+    }
+    icons.setMode(policy.iconMode)
+  }
+
+  private func updateInteractionMonitoring() {
+    guard !terminationPending, policy.suspensions.isEmpty else {
+      stopInteractionMonitoring()
+      return
+    }
+    guard mouseUpMonitor == nil else { return }
+    // Observe releases without consuming clicks or retaining event contents. Finder may publish
+    // the drop or desktop visibility change just after mouse-up, so recheck briefly afterwards.
+    mouseUpMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseUp) { [weak self] _ in
+      guard let self else { return }
+      if self.traceInteractions {
+        self.interactionStartedAt = ProcessInfo.processInfo.systemUptime
+        Log.line("mouse-up: immediate desktop refresh requested")
+      }
+      self.interactionRefresh.trigger()
+    }
+  }
+
+  private func stopInteractionMonitoring() {
+    if let mouseUpMonitor { NSEvent.removeMonitor(mouseUpMonitor) }
+    mouseUpMonitor = nil
+    interactionStartedAt = nil
+    interactionRefresh.cancel()
   }
 
   /// Whether one ordinary window covers essentially the whole main screen (a zoomed or full
   /// screen window). Positions and sizes only; window titles are never read.
   private func watchWindows() {
-    covered = Self.screenCovered(mainFrame.size)
+    guard policy.pollWindows else { return }
+    policy.covered = Self.screenCovered(mainFrame.size)
     updatePause()
   }
 
@@ -213,11 +321,13 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   private func updatePause() {
+    updatePolling()
     guard let page, page.ready else { return }
-    let pause = manualPause || !awake || covered
+    let pause = policy.paused
     guard pause != sentPause else { return }
     sentPause = pause
     page.send(["t": "pause", "v": pause])
+    if !pause { scheduleDesktopPreview() }
     Log.line(pause ? "paused" : "playing")
   }
 
@@ -252,6 +362,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
     let reload = NSMenuItem(title: Strings.reload, action: #selector(reloadPage), keyEquivalent: "")
     reload.target = self
     menu.addItem(reload)
+    previewItem.target = self
+    menu.addItem(previewItem)
     menu.addItem(.separator())
     grantItem.target = self
     grantItem.isHidden = Accessibility.trusted
@@ -268,7 +380,8 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
   func menuWillOpen(_ menu: NSMenu) {
     for (choice, entry) in themeItems { entry.state = choice == theme ? .on : .off }
-    pauseItem.state = manualPause ? .on : .off
+    pauseItem.state = policy.manualPause ? .on : .off
+    previewItem.state = desktopPreview.enabled ? .on : .off
     grantItem.isHidden = Accessibility.trusted
   }
 
@@ -279,13 +392,19 @@ final class Controller: NSObject, NSApplicationDelegate, NSMenuDelegate {
   }
 
   @objc private func togglePause() {
-    manualPause.toggle()
+    policy.manualPause.toggle()
     updatePause()
   }
 
   @objc private func reloadPage() {
     sentPause = nil
     page?.reload()
+  }
+
+  @objc private func toggleDesktopPreview() {
+    guard !terminationPending else { return }
+    desktopPreview.setEnabled(!desktopPreview.enabled)
+    scheduleDesktopPreview()
   }
 
   @objc private func grantAccess() { Accessibility.ask() }

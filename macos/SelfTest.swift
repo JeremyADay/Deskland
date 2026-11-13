@@ -113,7 +113,7 @@ final class SceneTest: NSObject, NSApplicationDelegate {
 
   private func ready() {
     guard let page else { return }
-    let sentBefore = page.sent.count
+    let sentBefore = page.sentCount
     note("received 'ready' (messages sent before it: \(sentBefore))")
     if sentBefore != 0 { fail("messages were sent before 'ready'") }
     page.send(["t": "settings", "v": theme.defaults])
@@ -134,12 +134,25 @@ final class SceneTest: NSObject, NSApplicationDelegate {
       (() => { const c = document.querySelector('canvas');
         return JSON.stringify({ dpr: devicePixelRatio, w: innerWidth, h: innerHeight, hidden: document.hidden,
           canvas: c && [c.width, c.height], webgl2: !!(c && c.getContext('webgl2')), href: location.href,
-          cap30: typeof P === 'object' ? P.cap30 : null, fps: typeof fpsEMA === 'number' ? Math.round(fpsEMA) : null }); })()
+          cap30: typeof P === 'object' ? P.cap30 : null, fps: typeof fpsEMA === 'number' ? Math.round(fpsEMA) : null,
+          frames: typeof frameN === 'number' ? frameN : null }); })()
       """
     note("asking the page for its state")
     page.view.evaluateJavaScript(probe) { [weak self] value, error in
       guard let self else { return }
-      self.note("page state: \(value ?? error?.localizedDescription ?? "?")")
+      if let error { fail("could not read page state: \(error.localizedDescription)") }
+      guard let text = value as? String, let data = text.data(using: .utf8),
+        let state = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+      else { fail("the page returned invalid state: \(value ?? "nil")") }
+      self.note("page state: \(text)")
+      guard state["webgl2"] as? Bool == true else { fail("WebGL2 is unavailable") }
+      guard let width = state["w"] as? Double, let height = state["h"] as? Double,
+        let scale = state["dpr"] as? Double, width > 0, height > 0, scale > 0,
+        let canvas = state["canvas"] as? [Int], canvas.count == 2,
+        canvas[0] == Int((width * scale).rounded()), canvas[1] == Int((height * scale).rounded())
+      else { fail("canvas dimensions do not match the page's physical pixel size") }
+      guard let frames = state["frames"] as? Int, frames > 0 else { fail("the scene did not render any frames") }
+      guard page.sentCount == 3 else { fail("expected settings, icons and pause to be sent exactly once") }
       self.note("taking the snapshot")
       self.snapshot()
     }
